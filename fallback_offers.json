@@ -1,0 +1,32 @@
+[
+  {
+    "name": "[Shopee] Teclado Mecânico Gamer Redragon RGB",
+    "currentPrice": 149.90,
+    "oldPrice": 299.90,
+    "discount": 50,
+    "image": "https://via.placeholder.com/150",
+    "affiliateLink": "https://shopee.com.br/exemplo-teclado",
+    "niche": "Gamer",
+    "score": 100
+  },
+  {
+    "name": "[Mercado Livre] Fone Bluetooth Baseus D02 Pro",
+    "currentPrice": 120.00,
+    "oldPrice": 200.00,
+    "discount": 40,
+    "image": "https://via.placeholder.com/150",
+    "affiliateLink": "https://mercadolivre.com.br/exemplo-fone",
+    "niche": "Eletrônicos",
+    "score": 90
+  },
+  {
+    "name": "[Magalu] Fritadeira Sem Óleo Air Fryer Mondial 4L",
+    "currentPrice": 299.00,
+    "oldPrice": 499.00,
+    "discount": 40,
+    "image": "https://via.placeholder.com/150",
+    "affiliateLink": "https://magazineluiza.com.br/exemplo-airfryer",
+    "niche": "Cozinha",
+    "score": 85
+  }
+]

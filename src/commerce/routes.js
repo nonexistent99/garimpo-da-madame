@@ -1,0 +1,316 @@
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
+const db = require('../database/database');
+const security = require('./security');
+const lastlink = require('./lastlinkService');
+const { smtpConfigured } = require('./emailService');
+const { processOffer, publishOffer } = require('./offerService');
+
+const uploadDir = process.env.UPLOAD_DIR
+  ? path.resolve(process.env.UPLOAD_DIR)
+  : path.resolve(__dirname, '../../uploads/real-products');
+fs.mkdirSync(uploadDir, { recursive: true });
+const upload = multer({
+  dest: uploadDir,
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => cb(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)),
+});
+const loginAttempts = new Map();
+
+function cleanText(value, max = 200) { return String(value || '').trim().slice(0, max); }
+function validEmail(value) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value); }
+function validInvite(value) { return !value || /^https:\/\/(chat\.)?whatsapp\.com\/[A-Za-z0-9_-]+/.test(value); }
+function renderTemplate(template, values) {
+  return String(template).replace(/{{(nome|link_acesso|suporte)}}/g, (_, key) => String(values[key] || ''));
+}
+
+function spreadsheetCell(value) {
+  let text = String(value ?? '').replace(/\0/g, '').replace(/\r?\n/g, ' ');
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function offerResearchDetails(raw) {
+  try {
+    const research = typeof raw === 'string' ? JSON.parse(raw || '{}') : (raw || {});
+    const sources = Array.isArray(research.sources)
+      ? research.sources.map(source => typeof source === 'string' ? source : (source.url || source.link || source.source)).filter(Boolean)
+      : [];
+    return {
+      sources: sources.join(' | '),
+      imageSource: research.imageSource || research.image_source || research.selectedImageSource || '',
+      notes: research.notes || research.summary || research.reason || '',
+    };
+  } catch {
+    return { sources: '', imageSource: '', notes: '' };
+  }
+}
+
+function buildOffersCsv(offers) {
+  const headers = [
+    'Código da oferta', 'Produto informado', 'Preço (R$)', 'Status', 'Modelo identificado',
+    'Confiança da pesquisa (%)', 'Legenda gerada', 'Tipo de imagem', 'URL da imagem',
+    'Foto real salva', 'Fonte da imagem', 'Fontes pesquisadas', 'Observações da pesquisa',
+    'Motivo da falha ou pendência', 'Tentativas de publicação', 'Publicado em', 'Criado em',
+    'Atualizado em', 'Grupo de acesso',
+  ];
+  const rows = offers.map(offer => {
+    const details = offerResearchDetails(offer.research_json);
+    const imageType = offer.real_image_path ? 'Foto real enviada' : (offer.selected_image_url ? 'Imagem de referência pesquisada' : 'Sem imagem');
+    return [
+      offer.id, offer.exact_name, (Number(offer.price_cents || 0) / 100).toFixed(2).replace('.', ','),
+      offer.status, offer.model_identified, offer.confidence == null ? '' : Math.round(Number(offer.confidence) * 100),
+      offer.caption, imageType, offer.selected_image_url, offer.real_image_path ? 'Sim' : 'Não',
+      details.imageSource, details.sources, details.notes, offer.failure_reason, offer.publish_attempts || 0,
+      offer.published_at, offer.created_at, offer.updated_at, offer.access_group_key || 'primary',
+    ];
+  });
+  return '\uFEFF' + [headers, ...rows].map(row => row.map(spreadsheetCell).join(';')).join('\r\n');
+}
+
+async function approveOrderFromProvider(providerId) {
+  const payment = require('./paymentService');
+  const providerPayment = await payment.fetchPayment(providerId);
+  const [order] = await db.getQuery('SELECT * FROM orders WHERE id=?', [String(providerPayment.external_reference || '')]);
+  if (!order) return { ok: false, reason: 'order_not_found' };
+  const verified = payment.verifyApprovedPayment(providerPayment, order);
+  if (!verified.ok) {
+    await db.runQuery('UPDATE orders SET provider_status=?, updated_at=? WHERE id=?', [providerPayment.status || verified.reason, new Date().toISOString(), order.id]);
+    return verified;
+  }
+  if (order.status === 'approved') return { ok: true, replay: true, orderId: order.id };
+  const rawToken = security.randomToken();
+  const approvedAt = new Date();
+  const expiresAt = new Date(approvedAt.getTime() + 24 * 60 * 60 * 1000);
+  const changed = await db.runQuery("UPDATE orders SET status='approved', provider_payment_id=?, provider_status='approved', approved_at=?, redeem_token_hash=?, redeem_expires_at=?, updated_at=? WHERE id=? AND status!='approved'",
+    [String(providerPayment.id), approvedAt.toISOString(), security.tokenHash(rawToken), expiresAt.toISOString(), approvedAt.toISOString(), order.id]);
+  if (!changed.changes) return { ok: true, replay: true, orderId: order.id };
+  const [[customer], [settings]] = await Promise.all([
+    db.getQuery('SELECT * FROM customers WHERE id=?', [order.customer_id]), db.getQuery('SELECT * FROM commerce_settings WHERE id=1'),
+  ]);
+  const accessUrl = `${String(process.env.BASE_PUBLIC_URL || 'http://localhost:3000').replace(/\/$/, '')}/resgate/${rawToken}`;
+  const subject = renderTemplate(settings.email_subject, { nome: customer.name, link_acesso: accessUrl, suporte: settings.support_phone });
+  const body = renderTemplate(settings.email_body, { nome: customer.name, link_acesso: accessUrl, suporte: settings.support_phone || 'não configurado' });
+  await db.runQuery('INSERT OR IGNORE INTO email_jobs (id,order_id,recipient,subject,body,status,attempts,next_attempt_at,created_at) VALUES (?,?,?,?,?,\'pending\',0,?,?)',
+    [security.randomId('mail'), order.id, customer.email, subject, body, approvedAt.toISOString(), approvedAt.toISOString()]);
+  return { ok: true, orderId: order.id, accessUrl };
+}
+
+async function grantAccess(order, customer) {
+  if (order.status === 'approved') return { ok: true, replay: true, orderId: order.id };
+  const rawToken = security.randomToken();
+  const approvedAt = new Date();
+  const expiresAt = new Date(approvedAt.getTime() + 24 * 60 * 60 * 1000);
+  const changed = await db.runQuery("UPDATE orders SET status='approved', provider_status='confirmed', approved_at=?, redeem_token_hash=?, redeem_expires_at=?, updated_at=? WHERE id=? AND status!='approved'",
+    [approvedAt.toISOString(), security.tokenHash(rawToken), expiresAt.toISOString(), approvedAt.toISOString(), order.id]);
+  if (!changed.changes) return { ok: true, replay: true, orderId: order.id };
+  const [settings] = await db.getQuery('SELECT * FROM commerce_settings WHERE id=1');
+  const accessUrl = `${String(process.env.BASE_PUBLIC_URL || 'http://localhost:3000').replace(/\/$/, '')}/resgate/${rawToken}`;
+  const subject = renderTemplate(settings.email_subject, { nome: customer.name, link_acesso: accessUrl, suporte: settings.support_phone });
+  const body = renderTemplate(settings.email_body, { nome: customer.name, link_acesso: accessUrl, suporte: settings.support_phone || 'não configurado' });
+  await db.runQuery('INSERT OR IGNORE INTO email_jobs (id,order_id,recipient,subject,body,status,attempts,next_attempt_at,created_at) VALUES (?,?,?,?,?,\'pending\',0,?,?)',
+    [security.randomId('mail'), order.id, customer.email, subject, body, approvedAt.toISOString(), approvedAt.toISOString()]);
+  return { ok: true, orderId: order.id, accessUrl };
+}
+
+function registerCommerceRoutes(app) {
+  app.get('/api/public/offer', async (_req, res) => {
+    await db.ready;
+    const [s] = await db.getQuery("SELECT access_name,access_description,price_cents,sales_status,support_phone,CASE WHEN invite_url IS NOT NULL AND invite_url != '' THEN 1 ELSE 0 END has_invite FROM commerce_settings WHERE id=1");
+    const providerReady = lastlink.checkoutConfigured() && /^https:\/\//.test(process.env.BASE_PUBLIC_URL || '');
+    const isLastlinkUrl = value => { try { const url = new URL(value); return url.protocol === 'https:' && /(^|\.)lastlink\.com$/i.test(url.hostname); } catch { return false; } };
+    const vipCheckout = process.env.LASTLINK_VIP_CHECKOUT_URL || process.env.LASTLINK_CHECKOUT_URL || '';
+    const clubCheckout = process.env.LASTLINK_CLUBE_CHECKOUT_URL || '';
+    res.json({
+      ...s,
+      configured: !!(s.price_cents && s.sales_status === 'active' && s.has_invite && s.support_phone && smtpConfigured() && providerReady),
+      paymentProvider: 'Lastlink',
+      checkoutUrl: providerReady ? process.env.LASTLINK_CHECKOUT_URL : null,
+      checkoutUrls: { vip: isLastlinkUrl(vipCheckout) ? vipCheckout : null, clube: isLastlinkUrl(clubCheckout) ? clubCheckout : null },
+    });
+  });
+
+  app.post('/api/public/orders', async (req, res) => {
+    return res.status(410).json({ error: 'O checkout agora é realizado diretamente pela Lastlink.' });
+    /* istanbul ignore next -- fluxo legado mantido temporariamente para referência de migração */
+    await db.ready;
+    if (!process.env.APP_SECRET || process.env.APP_SECRET.length < 32 || !process.env.MERCADO_PAGO_ACCESS_TOKEN || !process.env.MERCADO_PAGO_WEBHOOK_SECRET || !process.env.MERCADO_PAGO_COLLECTOR_ID || !/^https:\/\//.test(process.env.BASE_PUBLIC_URL || '')) return res.status(503).json({ error: 'Checkout ainda não configurado pela loja.' });
+    const [settings] = await db.getQuery('SELECT * FROM commerce_settings WHERE id=1');
+    if (settings.sales_status !== 'active' || !settings.price_cents || !settings.invite_url || !settings.support_phone || !smtpConfigured()) return res.status(409).json({ error: 'As vendas ainda não estão abertas.' });
+    const name = cleanText(req.body.name, 120), email = cleanText(req.body.email, 180).toLowerCase();
+    const cpf = security.normalizeCpf ? security.normalizeCpf(req.body.cpf) : String(req.body.cpf || '').replace(/\D/g, '');
+    const phone = String(req.body.phone || '').replace(/\D/g, '').slice(0, 15);
+    if (name.length < 3 || !validEmail(email) || !security.isCpfShapeValid(cpf) || phone.length < 10 || req.body.terms !== true) {
+      return res.status(422).json({ error: 'Confira nome, email, CPF, WhatsApp e aceite dos termos.' });
+    }
+    const now = new Date().toISOString(), customerId = security.randomId('cus'), orderId = security.randomId('ord');
+    await db.runQuery('INSERT INTO customers (id,name,email,cpf_encrypted,cpf_hash,cpf_mask,phone,terms_accepted_at,marketing_opt_in,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      [customerId, name, email, security.encryptCpf(cpf), security.hashCpf(cpf), security.maskCpf(cpf), phone, now, req.body.marketing === true ? 1 : 0, now]);
+    await db.runQuery('INSERT INTO orders (id,customer_id,amount_cents,currency,status,created_at,updated_at) VALUES (?,?,?,\'BRL\',\'pending\',?,?)', [orderId, customerId, settings.price_cents, now, now]);
+    try {
+      const pix = await payment.createPix({ id: orderId, amount_cents: settings.price_cents, description: settings.access_name }, { name, email, cpf });
+      await db.runQuery('UPDATE orders SET provider_payment_id=?,provider_status=?,pix_code=?,pix_qr_base64=?,updated_at=? WHERE id=?', [pix.id, pix.status, pix.qrCode, pix.qrBase64, new Date().toISOString(), orderId]);
+      res.status(201).json({ orderId, status: pix.status, pixCode: pix.qrCode, pixQrBase64: pix.qrBase64, amountCents: settings.price_cents });
+    } catch (error) {
+      await db.runQuery("UPDATE orders SET status='configuration_error',provider_status=?,updated_at=? WHERE id=?", [error.code || 'provider_error', new Date().toISOString(), orderId]);
+      res.status(error.code === 'PAYMENT_NOT_CONFIGURED' ? 503 : 502).json({ error: error.message, orderId });
+    }
+  });
+
+  app.get('/api/public/orders/:id', async (req, res) => {
+    const [row] = await db.getQuery('SELECT id,status,amount_cents,currency,provider_status,approved_at,redeem_expires_at FROM orders WHERE id=?', [req.params.id]);
+    if (!row) return res.status(404).json({ error: 'Pedido não encontrado.' });
+    res.json(row);
+  });
+
+  app.get('/api/public/redeem/:token', async (req, res) => {
+    const [row] = await db.getQuery(`SELECT o.status,o.approved_at,o.redeem_expires_at,s.invite_url,s.support_phone
+      FROM orders o CROSS JOIN commerce_settings s WHERE o.redeem_token_hash=?`, [security.tokenHash(req.params.token)]);
+    if (!row) return res.status(404).json({ error: 'Link de acesso inválido.' });
+    if (row.status !== 'approved') return res.status(403).json({ error: 'Pagamento ainda não aprovado.' });
+    if (new Date(row.redeem_expires_at).getTime() <= Date.now()) return res.status(410).json({ error: 'Esta página de resgate expirou. Fale com o suporte.', supportPhone: row.support_phone });
+    if (!row.invite_url) return res.status(503).json({ error: 'Convite temporariamente indisponível. Fale com o suporte.', supportPhone: row.support_phone });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ inviteUrl: row.invite_url, expiresAt: row.redeem_expires_at, supportPhone: row.support_phone });
+  });
+
+  app.post('/api/webhooks/mercadopago', async (req, res) => {
+    return res.status(410).json({ error: 'Integração substituída pela Lastlink.' });
+    /* istanbul ignore next -- fluxo legado mantido temporariamente para conciliação histórica */
+    const dataId = req.query['data.id'] || req.body?.data?.id;
+    const valid = payment.validateWebhookSignature({ signature: req.headers['x-signature'], requestId: req.headers['x-request-id'], dataId, secret: process.env.MERCADO_PAGO_WEBHOOK_SECRET });
+    if (!valid) return res.status(401).json({ error: 'Assinatura inválida.' });
+    const eventKey = `${req.headers['x-request-id']}:${dataId}`;
+    try { await db.runQuery('INSERT INTO webhook_events(provider,event_key,received_at) VALUES (\'mercadopago\',?,?)', [eventKey, new Date().toISOString()]); }
+    catch (error) { if (/UNIQUE|PRIMARY/.test(error.message)) return res.sendStatus(200); throw error; }
+    try {
+      const result = await approveOrderFromProvider(String(dataId));
+      await db.runQuery('UPDATE webhook_events SET processed_at=?,result=? WHERE provider=\'mercadopago\' AND event_key=?', [new Date().toISOString(), JSON.stringify(result), eventKey]);
+      res.sendStatus(200);
+    } catch (error) {
+      await db.runQuery('UPDATE webhook_events SET result=? WHERE provider=\'mercadopago\' AND event_key=?', [String(error.message).slice(0, 200), eventKey]);
+      res.sendStatus(500);
+    }
+  });
+
+  app.post('/api/webhooks/lastlink', async (req, res) => {
+    const plan = lastlink.webhookPlan(lastlink.webhookSecret(req));
+    if (!plan) return res.status(401).json({ error: 'Webhook não autorizado.' });
+    const event = lastlink.extract(req.body || {});
+    if (event.isTest) return res.json({ ok: true, test: true });
+    if (!event.eventId) return res.status(422).json({ error: 'Evento sem identificador.' });
+    try { await db.runQuery('INSERT INTO webhook_events(provider,event_key,received_at) VALUES (\'lastlink\',?,?)', [event.eventId, new Date().toISOString()]); }
+    catch (error) { if (/UNIQUE|PRIMARY/i.test(error.message)) return res.sendStatus(200); throw error; }
+    try {
+      if (['Payment_Refund', 'Payment_Chargeback'].includes(event.event)) {
+        await db.runQuery('UPDATE orders SET status=?,provider_status=?,updated_at=? WHERE provider_payment_id=?', [event.event === 'Payment_Refund' ? 'refunded' : 'chargeback', event.event, new Date().toISOString(), event.paymentId]);
+        await db.runQuery('UPDATE webhook_events SET processed_at=?,result=? WHERE provider=\'lastlink\' AND event_key=?', [new Date().toISOString(), JSON.stringify({ ok: true, revoked: true }), event.eventId]);
+        return res.sendStatus(200);
+      }
+      const [settings] = await db.getQuery('SELECT * FROM commerce_settings WHERE id=1');
+      const verified = lastlink.verifyPurchase(event, settings, plan);
+      if (!verified.ok) {
+        await db.runQuery('UPDATE webhook_events SET processed_at=?,result=? WHERE provider=\'lastlink\' AND event_key=?', [new Date().toISOString(), JSON.stringify(verified), event.eventId]);
+        return res.status(422).json({ error: verified.reason });
+      }
+      const name = cleanText(event.buyer.name, 120), email = cleanText(event.buyer.email, 180).toLowerCase();
+      const cpf = security.normalizeCpf(event.buyer.document); const phone = String(event.buyer.phone || '').replace(/\D/g, '').slice(0, 15);
+      if (name.length < 3 || !validEmail(email) || !security.isCpfShapeValid(cpf) || phone.length < 10) return res.status(422).json({ error: 'Dados do comprador incompletos.' });
+      const [existing] = await db.getQuery('SELECT * FROM orders WHERE provider_payment_id=?', [event.paymentId]);
+      if (existing) {
+        const [existingCustomer] = await db.getQuery('SELECT id,name,email,phone FROM customers WHERE id=?', [existing.customer_id]);
+        const recovered = await grantAccess(existing, existingCustomer);
+        await db.runQuery('UPDATE webhook_events SET processed_at=?,result=? WHERE provider=\'lastlink\' AND event_key=?', [new Date().toISOString(), JSON.stringify({ ok: true, recovered: true, orderId: recovered.orderId }), event.eventId]);
+        return res.sendStatus(200);
+      }
+      const now = new Date().toISOString(), customerId = security.randomId('cus'), orderId = security.randomId('ord');
+      const customer = { id: customerId, name, email, phone };
+      await db.runQuery('INSERT INTO customers (id,name,email,cpf_encrypted,cpf_hash,cpf_mask,phone,terms_accepted_at,marketing_opt_in,created_at) VALUES (?,?,?,?,?,?,?,?,0,?)',
+        [customerId, name, email, security.encryptCpf(cpf), security.hashCpf(cpf), security.maskCpf(cpf), phone, event.createdAt || now, now]);
+      await db.runQuery("INSERT INTO orders (id,customer_id,amount_cents,currency,status,provider_payment_id,provider_status,created_at,updated_at) VALUES (?,?,?,'BRL','pending',?,?,?,?)",
+        [orderId, customerId, event.amountCents, event.paymentId, `confirmed_${verified.plan}`, now, now]);
+      const result = await grantAccess({ id: orderId, status: 'pending' }, customer);
+      await db.runQuery('UPDATE webhook_events SET processed_at=?,result=? WHERE provider=\'lastlink\' AND event_key=?', [new Date().toISOString(), JSON.stringify({ ok: true, orderId }), event.eventId]);
+      res.json({ ok: true, orderId: result.orderId });
+    } catch (error) {
+      await db.runQuery('DELETE FROM webhook_events WHERE provider=\'lastlink\' AND event_key=? AND processed_at IS NULL', [event.eventId]).catch(() => {});
+      res.sendStatus(500);
+    }
+  });
+
+  app.post('/api/admin/login', (req, res) => {
+    const ip = req.ip; const attempt = loginAttempts.get(ip) || { count: 0, until: 0 };
+    if (attempt.until > Date.now()) return res.status(429).json({ error: 'Muitas tentativas. Aguarde alguns minutos.' });
+    if (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12) return res.status(503).json({ error: 'Defina ADMIN_PASSWORD com ao menos 12 caracteres no ambiente.' });
+    if (!security.safeEqual(req.body.password, process.env.ADMIN_PASSWORD)) {
+      attempt.count += 1; if (attempt.count >= 5) { attempt.until = Date.now() + 15 * 60_000; attempt.count = 0; } loginAttempts.set(ip, attempt);
+      return res.status(401).json({ error: 'Senha inválida.' });
+    }
+    loginAttempts.delete(ip); const session = security.createSession();
+    res.setHeader('Set-Cookie', `gm_admin=${session.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
+    res.json({ csrf: session.csrf });
+  });
+
+  app.get('/api/admin/session', security.requireAdmin, (req, res) => res.json({ authenticated: true, csrf: req.adminSession.csrf }));
+  app.post('/api/admin/logout', security.requireAdmin, (req, res) => { security.sessions.delete(req.adminSession.token); res.setHeader('Set-Cookie', 'gm_admin=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly'); res.json({ ok: true }); });
+
+  app.get('/api/admin/overview', security.requireAdmin, async (_req, res) => {
+    const [[settings], buyers, offers, emailJobs] = await Promise.all([
+      db.getQuery('SELECT * FROM commerce_settings WHERE id=1'),
+      db.getQuery(`SELECT o.id,o.amount_cents,o.currency,o.status,o.provider_status,o.approved_at,o.redeem_expires_at,o.created_at,c.name,c.email,c.cpf_mask,c.phone,c.marketing_opt_in,
+        e.status email_status,e.attempts email_attempts,e.last_error email_error FROM orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN email_jobs e ON e.order_id=o.id ORDER BY o.created_at DESC LIMIT 100`),
+      db.getQuery('SELECT * FROM store_offers ORDER BY created_at DESC LIMIT 100'), db.getQuery('SELECT status,COUNT(*) count FROM email_jobs GROUP BY status'),
+    ]);
+    res.json({ settings, buyers, offers, emailJobs, integrations: { lastlinkCheckout: !!process.env.LASTLINK_CHECKOUT_URL, lastlinkWebhook: !!process.env.LASTLINK_WEBHOOK_SECRET, lastlinkProduct: !!(process.env.LASTLINK_OFFER_ID || process.env.LASTLINK_PRODUCT_ID), smtp: smtpConfigured(), aiResearch: !!process.env.OPENAI_API_KEY } });
+  });
+
+  app.get('/api/admin/offers/export.csv', security.requireAdmin, async (_req, res) => {
+    const offers = await db.getQuery('SELECT * FROM store_offers ORDER BY created_at DESC');
+    const date = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="produtos-garimpo-${date}.csv"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(buildOffersCsv(offers));
+  });
+
+  app.put('/api/admin/settings', security.requireAdmin, async (req, res) => {
+    const [current] = await db.getQuery('SELECT * FROM commerce_settings WHERE id=1');
+    const price = req.body.priceCents === null || req.body.priceCents === '' ? null : Number(req.body.priceCents);
+    const status = ['active', 'paused'].includes(req.body.salesStatus) ? req.body.salesStatus : 'paused';
+    const invite = cleanText(req.body.inviteUrl, 400);
+    const supportPhone = String(req.body.supportPhone || '').replace(/\D/g, '').slice(0, 15);
+    if (price !== null && (!Number.isInteger(price) || price < 100)) return res.status(422).json({ error: 'Preço inválido.' });
+    if (status === 'active' && (!lastlink.checkoutConfigured() || !/^https:\/\//.test(process.env.BASE_PUBLIC_URL || ''))) return res.status(409).json({ error: 'Configure checkout, webhook e produto da Lastlink antes de abrir vendas.' });
+    if (!validInvite(invite)) return res.status(422).json({ error: 'Use um link de convite válido do WhatsApp.' });
+    if (!cleanText(req.body.accessName, 120) || !cleanText(req.body.accessDescription, 500) || !cleanText(req.body.emailSubject, 180) || !cleanText(req.body.emailBody, 3000)) return res.status(422).json({ error: 'Nome, descrição e textos de email são obrigatórios.' });
+    if (status === 'active' && (!price || !invite || supportPhone.length < 10 || !smtpConfigured())) return res.status(409).json({ error: 'Defina preço, convite, suporte e SMTP Brevo antes de abrir vendas.' });
+    const now = new Date().toISOString();
+    if (invite !== (current.invite_url || '')) await db.runQuery('INSERT INTO invite_history(id,invite_url,changed_at,changed_by) VALUES (?,?,?,\'admin\')', [security.randomId('inv'), invite || null, now]);
+    await db.runQuery(`UPDATE commerce_settings SET access_name=?,access_description=?,price_cents=?,sales_status=?,invite_url=?,support_phone=?,destination_group_id=?,email_subject=?,email_body=?,updated_at=? WHERE id=1`,
+      [cleanText(req.body.accessName, 120), cleanText(req.body.accessDescription, 500), price, status, invite || null, supportPhone, cleanText(req.body.destinationGroupId, 120), cleanText(req.body.emailSubject, 180), cleanText(req.body.emailBody, 3000), now]);
+    res.json({ ok: true });
+  });
+  app.get('/api/admin/invite-history', security.requireAdmin, async (_req, res) => res.json(await db.getQuery('SELECT * FROM invite_history ORDER BY changed_at DESC LIMIT 50')));
+
+  app.post('/api/admin/offers', security.requireAdmin, async (req, res) => {
+    const name = cleanText(req.body.exactName, 220), cents = Number(req.body.priceCents);
+    if (name.length < 3 || !Number.isInteger(cents) || cents < 1) return res.status(422).json({ error: 'Informe nome exato e preço válido.' });
+    const id = security.randomId('off'), now = new Date().toISOString();
+    await db.runQuery('INSERT INTO store_offers(id,exact_name,price_cents,status,created_at,updated_at) VALUES (?,?,?,\'researching\',?,?)', [id, name, cents, now, now]);
+    processOffer(id).catch(() => {});
+    res.status(202).json({ id, status: 'researching' });
+  });
+
+  app.post('/api/admin/offers/:id/photo', security.requireAdmin, upload.single('photo'), async (req, res) => {
+    if (!req.file) return res.status(422).json({ error: 'Envie JPG, PNG ou WebP de até 8 MB.' });
+    const canPublish = !!(process.env.OPENAI_API_KEY && process.env.OPENAI_RESEARCH_MODEL);
+    await db.runQuery("UPDATE store_offers SET real_image_path=?,selected_image_url=NULL,image_is_illustrative=0,status=?,failure_reason=?,updated_at=? WHERE id=?", [req.file.path, canPublish ? 'ready' : 'configuration_pending', canPublish ? null : 'Configure a integração de IA antes de publicar.', new Date().toISOString(), req.params.id]);
+    if (!canPublish) return res.status(202).json({ ok: true, status: 'configuration_pending' });
+    publishOffer(req.params.id).catch(() => {});
+    res.status(202).json({ ok: true, status: 'ready' });
+  });
+  app.post('/api/admin/offers/:id/publish', security.requireAdmin, async (req, res) => res.json({ sent: await publishOffer(req.params.id) }));
+}
+
+module.exports = { registerCommerceRoutes, approveOrderFromProvider, buildOffersCsv };
