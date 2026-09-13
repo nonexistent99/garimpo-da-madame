@@ -343,9 +343,9 @@ dialog h2 { font-size: 32px; }
 .reward-stage h2 { max-width: 500px; margin: 12px auto 16px; font-size: clamp(42px, 8vw, 67px); line-height: .95; }
 .reward-stage h2 span { display: block; color: var(--magenta); text-shadow: 3px 3px 0 var(--yellow); }
 .reward-stage > p { max-width: 440px; margin: 0 auto 24px; font-size: 17px; line-height: 1.48; }
-.reward-stage .field { max-width: 410px; margin: 0 auto 22px; text-align: left; }
+.reward-stage .field { max-width: 410px; margin: 0 auto; text-align: left; }
 .reward-stage .field span { display: block; margin-bottom: 7px; font-weight: 800; }
-.phone-hint { max-width: 410px !important; margin: -14px auto 20px !important; color: var(--muted); font-size: 13px !important; text-align: left; }
+.phone-hint { max-width: 410px !important; margin: 8px auto 20px !important; color: var(--muted); font-size: 13px !important; line-height: 1.35; text-align: left; }
 .reward-stage input[aria-invalid="false"] { border-color: #248500; box-shadow: 4px 4px 0 var(--green); }
 .reward-confetti { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
 .reward-confetti i { position: absolute; top: -16px; width: 13px; height: 26px; background: var(--magenta); animation: confetti-fall 2.8s linear infinite; }
