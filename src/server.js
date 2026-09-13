@@ -55,7 +55,15 @@ app.get('/api/health', async (_req, res) => {
   try {
     await db.ready;
     await db.getQuery('SELECT 1 AS ok');
-    res.json({ status: 'ok', database: process.env.DATABASE_URL ? 'postgresql' : 'sqlite' });
+    const commit = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.COMMIT_REF || null;
+    res.json({
+      status: 'ok',
+      database: process.env.DATABASE_URL ? 'postgresql' : 'sqlite',
+      release: {
+        commit: commit ? commit.slice(0, 12) : null,
+        capabilities: ['admin-realtime', 'order-email-recovery']
+      }
+    });
   } catch (_error) {
     res.status(503).json({ status: 'unavailable' });
   }
