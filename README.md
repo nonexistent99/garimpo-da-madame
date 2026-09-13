@@ -20,8 +20,8 @@ banco ou frontend.
   `EMAIL_FROM`. O plano gratuito atualmente divulgado pela Brevo permite até
   300 emails por dia, compartilhados entre fluxos da conta e sujeitos às regras
   do serviço; não é email gratuito ilimitado.
-- Pesquisa de ofertas: `OPENAI_API_KEY` e opcionalmente
-  `OPENAI_RESEARCH_MODEL`. Sem chave, nenhuma pesquisa nem publicação é fingida.
+- Preparação e validação visual de ofertas: `NVIDIA_API_KEY`,
+  `NVIDIA_TEXT_MODEL` e `NVIDIA_VISION_MODEL`. Sem essas variáveis, nenhuma oferta é publicada automaticamente.
 
 O webhook valida a assinatura HMAC, consulta o pagamento na API do Mercado
 Pago e confere status aprovado, pedido, moeda, valor e recebedor. Eventos e
@@ -93,7 +93,9 @@ DATABASE_PATH=./data/app.db
 BASE_PUBLIC_URL=http://localhost:3000
 ENCRYPTION_KEY=change_me_32_chars_minimum
 
-OPENAI_API_KEY=
+NVIDIA_API_KEY=
+NVIDIA_TEXT_MODEL=openai/gpt-oss-20b
+NVIDIA_VISION_MODEL=meta/llama-3.2-90b-vision-instruct
 ELEVENLABS_API_KEY=
 TELEGRAM_BOT_TOKEN=
 ```

@@ -5,7 +5,7 @@ const db = require('../database/database');
 const security = require('./security');
 const lastlink = require('./lastlinkService');
 const { smtpConfigured } = require('./emailService');
-const { processOffer, publishOffer } = require('./offerService');
+const { processOffer, publishOffer, analyzeRealPhoto } = require('./offerService');
 
 const uploadDir = process.env.UPLOAD_DIR
   ? path.resolve(process.env.UPLOAD_DIR)
@@ -295,7 +295,7 @@ function registerCommerceRoutes(app) {
         e.status email_status,e.attempts email_attempts,e.last_error email_error FROM orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN email_jobs e ON e.order_id=o.id ORDER BY o.created_at DESC LIMIT 100`),
       db.getQuery('SELECT * FROM store_offers ORDER BY created_at DESC LIMIT 100'), db.getQuery('SELECT status,COUNT(*) count FROM email_jobs GROUP BY status'),
     ]);
-    res.json({ settings, buyers, offers, emailJobs, integrations: { lastlinkCheckout: !!process.env.LASTLINK_CHECKOUT_URL, lastlinkWebhook: !!process.env.LASTLINK_WEBHOOK_SECRET, lastlinkProduct: !!(process.env.LASTLINK_OFFER_ID || process.env.LASTLINK_PRODUCT_ID), smtp: smtpConfigured(), aiResearch: !!process.env.OPENAI_API_KEY } });
+    res.json({ settings, buyers, offers, emailJobs, integrations: { lastlinkCheckout: !!process.env.LASTLINK_CHECKOUT_URL, lastlinkWebhook: !!process.env.LASTLINK_WEBHOOK_SECRET, lastlinkProduct: !!(process.env.LASTLINK_OFFER_ID || process.env.LASTLINK_PRODUCT_ID), smtp: smtpConfigured(), aiResearch: !!(process.env.NVIDIA_API_KEY && process.env.NVIDIA_TEXT_MODEL && process.env.NVIDIA_VISION_MODEL) } });
   });
 
   app.get('/api/admin/offers/export.csv', security.requireAdmin, async (_req, res) => {
@@ -337,11 +337,27 @@ function registerCommerceRoutes(app) {
 
   app.post('/api/admin/offers/:id/photo', security.requireAdmin, upload.single('photo'), async (req, res) => {
     if (!req.file) return res.status(422).json({ error: 'Envie JPG, PNG ou WebP de até 8 MB.' });
-    const canPublish = !!(process.env.OPENAI_API_KEY && process.env.OPENAI_RESEARCH_MODEL);
-    await db.runQuery("UPDATE store_offers SET real_image_path=?,selected_image_url=NULL,image_is_illustrative=0,status=?,failure_reason=?,updated_at=? WHERE id=?", [req.file.path, canPublish ? 'ready' : 'configuration_pending', canPublish ? null : 'Configure a integração de IA antes de publicar.', new Date().toISOString(), req.params.id]);
-    if (!canPublish) return res.status(202).json({ ok: true, status: 'configuration_pending' });
-    publishOffer(req.params.id).catch(() => {});
-    res.status(202).json({ ok: true, status: 'ready' });
+    const [offer] = await db.getQuery('SELECT * FROM store_offers WHERE id=?', [req.params.id]);
+    if (!offer) return res.status(404).json({ error: 'Oferta não encontrada.' });
+    await db.runQuery("UPDATE store_offers SET real_image_path=?,selected_image_url=NULL,image_is_illustrative=0,status='researching',failure_reason=NULL,updated_at=? WHERE id=?", [req.file.path, new Date().toISOString(), req.params.id]);
+    try {
+      const analysis = await analyzeRealPhoto(offer, req.file.path);
+      if (analysis.configurationPending) {
+        await db.runQuery("UPDATE store_offers SET status='configuration_pending',failure_reason=?,updated_at=? WHERE id=?", [analysis.reason, new Date().toISOString(), req.params.id]);
+        return res.status(202).json({ ok: true, status: 'configuration_pending' });
+      }
+      if (analysis.blocked) {
+        await db.runQuery("UPDATE store_offers SET status='needs_real_photo',failure_reason=?,research_json=?,updated_at=? WHERE id=?", [analysis.reason, JSON.stringify(analysis.raw || {}), new Date().toISOString(), req.params.id]);
+        return res.status(422).json({ error: analysis.reason, status: 'needs_real_photo' });
+      }
+      const result = analysis.result;
+      await db.runQuery("UPDATE store_offers SET model_identified=?,confidence=?,caption=?,research_json=?,status='ready',failure_reason=NULL,updated_at=? WHERE id=?", [result.model, Number(result.confidence), result.caption, JSON.stringify({ provider: 'nvidia', vision: result }), new Date().toISOString(), req.params.id]);
+      publishOffer(req.params.id).catch(() => {});
+      return res.status(202).json({ ok: true, status: 'ready' });
+    } catch (error) {
+      await db.runQuery("UPDATE store_offers SET status='failed',failure_reason=?,updated_at=? WHERE id=?", [String(error.message).slice(0, 300), new Date().toISOString(), req.params.id]);
+      return res.status(502).json({ error: 'A validação da imagem pela NVIDIA falhou. Tente novamente.' });
+    }
   });
   app.post('/api/admin/offers/:id/publish', security.requireAdmin, async (req, res) => res.json({ sent: await publishOffer(req.params.id) }));
 }

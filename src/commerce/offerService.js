@@ -2,43 +2,41 @@ const fs = require('fs');
 const db = require('../database/database');
 const { sendWhatsAppMessage, getStatus } = require('../services/whatsappService');
 
-function extractOutputText(payload) {
-  if (payload.output_text) return payload.output_text;
-  return (payload.output || []).flatMap(item => item.content || []).filter(c => c.type === 'output_text').map(c => c.text).join('\n');
+function aiConfigured() {
+  return Boolean(process.env.NVIDIA_API_KEY && process.env.NVIDIA_TEXT_MODEL && process.env.NVIDIA_VISION_MODEL);
+}
+
+function parseJsonContent(payload) {
+  const text = payload?.choices?.[0]?.message?.content || '';
+  return JSON.parse(text.replace(/^```json\s*|\s*```$/g, '').trim());
+}
+
+async function nvidiaChat(model, messages, maxTokens = 700) {
+  const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.1, stream: false }),
+  });
+  if (!response.ok) throw new Error(`NVIDIA respondeu com erro ${response.status}.`);
+  return response.json();
 }
 
 async function researchOffer(offer) {
-  if (!process.env.OPENAI_API_KEY || !process.env.OPENAI_RESEARCH_MODEL) return { configurationPending: true, reason: 'Pesquisa e visão não configuradas: defina OPENAI_API_KEY e OPENAI_RESEARCH_MODEL.' };
-  const prompt = `Pesquise na web este produto informado por uma loja física de logística reversa: "${offer.exact_name}". O preço informado pela loja é R$ ${(offer.price_cents / 100).toFixed(2)}. Identifique apenas o modelo exato. Selecione uma foto de produto compatível, de fonte legítima e com proveniência explícita, sem montagem promocional, preço sobreposto ou confusão de variantes. Não infira condição, estoque, garantia, desconto ou preço anterior. Responda SOMENTE JSON válido: {"model":"...","model_confidence":0.0,"image_url":"https://...","image_source_page":"https://...","usage_basis":"fabricante|revendedor|licenca_aberta|desconhecida","sources":[{"url":"...","title":"..."}],"caption":"..."}. A legenda deve ser curta, em português brasileiro, chamar para falar com o atendente no WhatsApp e informar que disponibilidade e condição devem ser confirmadas.`;
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: process.env.OPENAI_RESEARCH_MODEL, tools: [{ type: 'web_search' }], include: ['web_search_call.action.sources'], store: false, input: prompt }),
-  });
-  if (!response.ok) throw new Error(`Pesquisa falhou (${response.status}).`);
-  const raw = await response.json();
-  const text = extractOutputText(raw).replace(/^```json\s*|\s*```$/g, '').trim();
-  const result = JSON.parse(text);
-  if (!Array.isArray(result.sources) || !result.sources.length) return { blocked: true, reason: 'A pesquisa não apresentou proveniência verificável.', raw: result };
-  if (Number(result.model_confidence) < 0.85 || !/^https:\/\//.test(result.image_url || '') || !/^https:\/\//.test(result.image_source_page || '') || result.usage_basis === 'desconhecida') {
-    return { blocked: true, reason: 'Modelo ou imagem ambíguos. Envie uma foto real.', raw: result };
-  }
-  const visionResponse = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: process.env.OPENAI_RESEARCH_MODEL, store: false, input: [{ role: 'user', content: [
-      { type: 'input_text', text: `Compare visualmente esta imagem com o produto exato "${offer.exact_name}" e o modelo pesquisado "${result.model}". Bloqueie se houver outro modelo/variante, montagem, preço ou texto promocional sobreposto, sinais de imagem sintética, baixa legibilidade ou se não for uma foto de produto limpa. Responda SOMENTE JSON: {"exact_match":true,"confidence":0.0,"clean_product_photo":true,"suspected_synthetic":false,"reason":"..."}` },
-      { type: 'input_image', image_url: result.image_url, detail: 'high' },
-    ] }] }),
-  });
-  if (!visionResponse.ok) return { blocked: true, reason: `A validação visual falhou (${visionResponse.status}). Envie uma foto real.`, raw: result };
-  const visionRaw = await visionResponse.json();
-  const vision = JSON.parse(extractOutputText(visionRaw).replace(/^```json\s*|\s*```$/g, '').trim());
-  result.vision = vision;
-  if (vision.exact_match !== true || vision.clean_product_photo !== true || vision.suspected_synthetic === true || Number(vision.confidence) < 0.9) {
-    return { blocked: true, reason: `Imagem bloqueada pela validação visual: ${vision.reason || 'compatibilidade insuficiente'}. Envie uma foto real.`, raw: result };
-  }
-  return { blocked: false, result };
+  if (!aiConfigured()) return { configurationPending: true, reason: 'IA NVIDIA não configurada. Defina a chave e os modelos de texto e visão.' };
+  const prompt = `Você prepara ofertas para uma loja física de logística reversa. O administrador informou "${offer.exact_name}" por R$ ${(offer.price_cents / 100).toFixed(2)}. Não invente variante, condição, estoque, garantia, preço anterior ou desconto. Responda somente JSON válido: {"model":"nome informado normalizado","model_confidence":0.0,"caption":"legenda curta em português brasileiro que mencione o preço e convide a consultar disponibilidade e condição com o atendimento"}.`;
+  const result = parseJsonContent(await nvidiaChat(process.env.NVIDIA_TEXT_MODEL, [{ role: 'user', content: prompt }]));
+  return { blocked: true, reason: 'Envie uma foto real do produto para a validação visual antes da publicação.', raw: result };
+}
+
+async function analyzeRealPhoto(offer, imagePath) {
+  if (!aiConfigured()) return { configurationPending: true, reason: 'Configure a integração NVIDIA antes de publicar.' };
+  const extension = String(imagePath).toLowerCase().endsWith('.png') ? 'png' : String(imagePath).toLowerCase().endsWith('.webp') ? 'webp' : 'jpeg';
+  const imageUrl = `data:image/${extension};base64,${fs.readFileSync(imagePath).toString('base64')}`;
+  const prompt = `Analise a foto enviada para uma oferta chamada "${offer.exact_name}" pelo preço R$ ${(offer.price_cents / 100).toFixed(2)}. Bloqueie se o produto visível for incompatível, ilegível, uma montagem promocional, tiver preço/texto sobreposto ou sinais de imagem sintética. Não invente condição, estoque, garantia, preço anterior ou desconto. Responda somente JSON válido: {"model":"produto ou modelo visível","exact_match":true,"confidence":0.0,"clean_product_photo":true,"suspected_synthetic":false,"reason":"...","caption":"legenda curta em português brasileiro com o preço e convite para confirmar disponibilidade e condição no atendimento"}.`;
+  const messages = [{ role: 'user', content: [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: imageUrl } }] }];
+  const result = parseJsonContent(await nvidiaChat(process.env.NVIDIA_VISION_MODEL, messages, 900));
+  const approved = result.exact_match === true && result.clean_product_photo === true && result.suspected_synthetic !== true && Number(result.confidence) >= 0.85;
+  return approved ? { blocked: false, result } : { blocked: true, reason: `Foto bloqueada pela validação visual: ${result.reason || 'compatibilidade insuficiente'}.`, raw: result };
 }
 
 function buildCaption(offer, settings) {
@@ -59,13 +57,11 @@ async function processOffer(id) {
       return;
     }
     if (researched.blocked) {
-      await db.runQuery("UPDATE store_offers SET status='needs_real_photo', failure_reason=?, research_json=?, updated_at=? WHERE id=?", [researched.reason, JSON.stringify(researched.raw || {}), new Date().toISOString(), id]);
+      const draft = researched.raw || {};
+      await db.runQuery("UPDATE store_offers SET status='needs_real_photo', model_identified=?, confidence=?, caption=?, failure_reason=?, research_json=?, updated_at=? WHERE id=?", [draft.model || offer.exact_name, Number(draft.model_confidence) || 0, draft.caption || null, researched.reason, JSON.stringify(draft), new Date().toISOString(), id]);
       return;
     }
-    const r = researched.result;
-    await db.runQuery("UPDATE store_offers SET model_identified=?, confidence=?, selected_image_url=?, image_is_illustrative=1, caption=?, research_json=?, status='ready', failure_reason=NULL, updated_at=? WHERE id=?",
-      [r.model, Math.min(Number(r.model_confidence), Number(r.vision.confidence)), r.image_url, r.caption, JSON.stringify({ sources: r.sources, image_url: r.image_url, image_source_page: r.image_source_page, usage_basis: r.usage_basis, vision: r.vision }), new Date().toISOString(), id]);
-    await publishOffer(id);
+    throw new Error('A validação exige uma foto real antes da publicação.');
   } catch (error) {
     await db.runQuery("UPDATE store_offers SET status='failed', failure_reason=?, updated_at=? WHERE id=?", [String(error.message).slice(0, 300), new Date().toISOString(), id]);
   }
@@ -97,4 +93,4 @@ async function runOfferWorker() {
   for (const row of ready) await publishOffer(row.id);
 }
 
-module.exports = { processOffer, publishOffer, runOfferWorker, buildCaption };
+module.exports = { processOffer, publishOffer, runOfferWorker, buildCaption, analyzeRealPhoto };

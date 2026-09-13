@@ -4,8 +4,8 @@ let offer;
 let selectedPlan = null;
 const track = (name, parameters = {}) => window.trackLandingEvent?.(name, parameters);
 const plans = {
-  vip: { label: 'VIP GARIMPO', name: 'VIP Garimpo', description: 'Descontos em produtos participantes, grupo privado, pedidos pelo WhatsApp e novidades antecipadas.' },
-  clube: { label: 'CLUBE SÓCIO', name: 'Clube Sócio', description: 'Para CNPJ e compras em lote, com atendimento comercial e acesso antecipado às novidades.' },
+  vip: { label: 'VIP GARIMPO', name: 'VIP Garimpo', description: 'Um ano inteiro para chegar antes, ativar benefícios pelo CPF e pagar menos em produtos selecionados.' },
+  clube: { label: 'CLUBE SÓCIO', name: 'Clube Sócio', description: 'Para CNPJ, lojistas e revendedores que buscam lotes e condições de compra em quantidade.' },
 };
 
 async function api(url, options = {}) {
@@ -41,6 +41,22 @@ function normalizePhone(value) {
   if (digits.length < 10 || digits.length > 15) return '';
   return digits.startsWith('55') ? `+${digits}` : `+55${digits}`;
 }
+
+function formatPhone(value) {
+  const digits = String(value || '').replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '').slice(0, 11);
+  if (!digits) return '';
+  if (digits.length < 3) return `(${digits}`;
+  const area = digits.slice(0, 2);
+  const rest = digits.slice(2);
+  if (rest.length <= 4) return `(${area}) ${rest}`;
+  const split = rest.length > 8 ? 5 : 4;
+  return `(${area}) ${rest.slice(0, split)}-${rest.slice(split)}`;
+}
+
+['buyerPhone', 'rewardPhone'].forEach(id => {
+  const input = document.getElementById(id);
+  input?.addEventListener('input', () => { input.value = formatPhone(input.value); });
+});
 
 function checkoutUrlFor(name, phone) {
   const checkout = new URL(offer.checkoutUrls[selectedPlan]);
@@ -114,7 +130,27 @@ $$('.js-plan').forEach(button => button.addEventListener('click', () => {
 $$('.js-access-cta').forEach((cta, index) => {
   cta.addEventListener('click', () => track('access_cta_click', {
     cta_position: cta.id === 'mainCta' ? 'hero' : cta.classList.contains('mobile-cta') ? 'mobile_fixed' : `section_${index + 1}`
-  }));
+}));
+
+const storeVideos = $$('.store-video');
+let activeStoreVideo = null;
+function playOnly(video, fromScroll = false) {
+  storeVideos.forEach(other => { if (other !== video) other.pause(); });
+  if (fromScroll && activeStoreVideo !== video) video.muted = true;
+  activeStoreVideo = video;
+  video.play().catch(() => {});
+}
+storeVideos.forEach(video => video.addEventListener('play', () => playOnly(video)));
+if ('IntersectionObserver' in window && storeVideos.length) {
+  const ratios = new Map();
+  const videoObserver = new IntersectionObserver(entries => {
+    entries.forEach(entry => ratios.set(entry.target, entry.intersectionRatio));
+    const visible = [...ratios.entries()].filter(([, ratio]) => ratio >= .55).sort((a, b) => b[1] - a[1])[0];
+    if (visible) playOnly(visible[0], true);
+    else if (activeStoreVideo) activeStoreVideo.pause();
+  }, { threshold: [0, .25, .55, .75, 1] });
+  storeVideos.forEach(video => videoObserver.observe(video));
+}
 });
 
 $$('[data-dialog]').forEach(button => {
@@ -130,33 +166,30 @@ const rewardClaim = $('#rewardClaim');
 const rewardUnlocked = $('#rewardUnlocked');
 const rewardPhone = $('#rewardPhone');
 const rewardSlider = $('#rewardSlider');
-const rewardExpiryKey = 'garimpo_reward_75_expiry';
-let rewardExpiry;
-
-function updateRewardCountdown() {
-  const seconds = Math.max(0, Math.ceil((rewardExpiry - Date.now()) / 1000));
-  const hours = String(Math.floor(seconds / 3600)).padStart(2, '0');
-  const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
-  const secs = String(seconds % 60).padStart(2, '0');
-  $('#rewardCountdown').textContent = `${hours}:${minutes}:${secs}`;
-  if (!seconds) localStorage.removeItem(rewardExpiryKey);
-}
+const slideClaim = $('#slideClaim');
+let rewardUnlocking = false;
 
 function showRewardUnlocked(phone) {
-  rewardExpiry = Number(localStorage.getItem(rewardExpiryKey)) || (Date.now() + 24 * 60 * 60 * 1000);
-  localStorage.setItem(rewardExpiryKey, String(rewardExpiry));
   if (phone) $('#buyerPhone').value = phone;
   rewardClaim.hidden = true;
   rewardUnlocked.hidden = false;
-  updateRewardCountdown();
   track('reward_claimed', { reward: '75_percent_discount' });
+}
+
+function setRewardProgress(value) {
+  const progress = Math.max(0, Math.min(100, Number(value) || 0));
+  slideClaim?.style.setProperty('--progress', `${progress}%`);
+  const thumb = slideClaim?.querySelector('span');
+  if (thumb && slideClaim) {
+    const maxTravel = Math.max(0, slideClaim.clientWidth - thumb.offsetWidth - 10);
+    thumb.style.transform = `translateX(${Math.round(maxTravel * progress / 100)}px)`;
+  }
+  return progress;
 }
 
 function openReward() {
   if (sessionStorage.getItem('garimpo_reward_seen') || !rewardDialog) return;
   sessionStorage.setItem('garimpo_reward_seen', '1');
-  const expiresAt = Number(localStorage.getItem(rewardExpiryKey));
-  if (expiresAt > Date.now()) showRewardUnlocked();
   rewardDialog.showModal();
   track('reward_popup_open', { placement: 'after_real_store' });
 }
@@ -168,21 +201,45 @@ if (rewardDialog && 'IntersectionObserver' in window) {
 }
 
 rewardSlider?.addEventListener('input', () => {
-  if (Number(rewardSlider.value) < 94) return;
+  if (rewardUnlocking) return;
+  const progress = setRewardProgress(rewardSlider.value);
+  slideClaim.classList.add('is-dragging');
+  rewardSlider.setAttribute('aria-valuetext', `${progress}% resgatado`);
+  if (progress < 25) $('#rewardStatus').textContent = 'Arraste a seta até o fim para resgatar.';
+  else if (progress < 75) $('#rewardStatus').textContent = 'Boa! Continue deslizando.';
+  else if (progress < 94) $('#rewardStatus').textContent = 'Quase lá. Solte só no final.';
+  if (progress < 94) return;
   const phone = normalizePhone(rewardPhone.value);
   if (!phone) {
     rewardSlider.value = 0;
+    setRewardProgress(0);
+    slideClaim.classList.remove('is-dragging');
     $('#rewardStatus').textContent = 'Informe um WhatsApp válido com DDD antes de resgatar.';
     rewardPhone.focus();
     return;
   }
-  showRewardUnlocked(phone);
+  rewardUnlocking = true;
+  setRewardProgress(100);
+  slideClaim.classList.remove('is-dragging');
+  slideClaim.classList.add('ready');
+  $('#rewardStatus').textContent = 'Resgate confirmado!';
+  setTimeout(() => showRewardUnlocked(phone), 520);
+});
+
+rewardSlider?.addEventListener('pointerdown', () => slideClaim?.classList.add('is-dragging'));
+rewardSlider?.addEventListener('pointerup', () => {
+  if (!rewardUnlocking) slideClaim?.classList.remove('is-dragging');
+});
+
+rewardPhone?.addEventListener('input', () => {
+  const valid = Boolean(normalizePhone(rewardPhone.value));
+  $('#rewardStatus').textContent = valid ? 'Número pronto. Agora arraste a seta.' : '';
+  rewardPhone.setAttribute('aria-invalid', valid ? 'false' : 'true');
 });
 
 $('#rewardCheckout')?.addEventListener('click', () => {
   rewardDialog.close();
   document.querySelector('.js-plan[data-plan="vip"]')?.click();
-  $('#acesso').scrollIntoView({ behavior: 'smooth', block: 'start' });
   setTimeout(() => $('#buyerName').focus(), 550);
 });
 

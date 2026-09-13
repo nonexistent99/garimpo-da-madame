@@ -96,7 +96,7 @@ test('resgate válido mostra o convite atual sem estender o prazo', async t => {
 });
 
 test('sem IA oferta fica em configuração pendente e não entra em publicação', async () => {
-  delete process.env.OPENAI_API_KEY; const id=security.randomId('off'),now=new Date().toISOString();
+  delete process.env.NVIDIA_API_KEY; const id=security.randomId('off'),now=new Date().toISOString();
   await db.runQuery("INSERT INTO store_offers(id,exact_name,price_cents,status,created_at,updated_at) VALUES(?,?,1000,'researching',?,?)",[id,'Produto exato modelo X',now,now]);
   await processOffer(id);const [offer]=await db.getQuery('SELECT status,published_at FROM store_offers WHERE id=?',[id]);assert.equal(offer.status,'configuration_pending');assert.equal(offer.published_at,null);
 });
