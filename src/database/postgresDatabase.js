@@ -141,6 +141,11 @@ async function initDb() {
       'Olá, {{nome}}! Seu pagamento foi confirmado. Abra sua página segura para acessar o convite: {{link_acesso}}\\n\\nDúvidas: {{suporte}}',
       CURRENT_TIMESTAMP::text)
     ON CONFLICT (id) DO NOTHING`);
+  await db.query(`UPDATE orders SET access_group_key = CASE
+    WHEN provider_status = 'confirmed_clube' THEN 'clube'
+    WHEN provider_status IN ('confirmed_vip', 'confirmed') THEN 'vip'
+    ELSE access_group_key
+  END WHERE access_group_key = 'primary'`);
   console.log('[PostgreSQL] Inicialização completa.');
 }
 

@@ -133,6 +133,11 @@ async function createCommerceTables() {
   await safeAddColumn('customers', 'cpf_mask', "TEXT NOT NULL DEFAULT '***.***.***-**'");
   await safeAddColumn('orders', 'access_group_key', "TEXT NOT NULL DEFAULT 'primary'");
   await safeAddColumn('store_offers', 'access_group_key', "TEXT NOT NULL DEFAULT 'primary'");
+  await runSync(`UPDATE orders SET access_group_key = CASE
+    WHEN provider_status = 'confirmed_clube' THEN 'clube'
+    WHEN provider_status IN ('confirmed_vip', 'confirmed') THEN 'vip'
+    ELSE access_group_key
+  END WHERE access_group_key = 'primary'`);
 }
 
 async function createLegacyTables() {

@@ -4,7 +4,8 @@ const multer = require('multer');
 const db = require('../database/database');
 const security = require('./security');
 const lastlink = require('./lastlinkService');
-const { smtpConfigured } = require('./emailService');
+const { smtpConfigured, getEmailWorkerStatus } = require('./emailService');
+const adminEvents = require('./adminEvents');
 const { processOffer, publishOffer, analyzeRealPhoto } = require('./offerService');
 
 const uploadDir = process.env.UPLOAD_DIR
@@ -25,6 +26,23 @@ function validInvite(value) { return !value || /^https:\/\/(chat\.)?whatsapp\.co
 function maskName(value) { const parts = cleanText(value, 120).split(/\s+/).filter(Boolean); return parts.length ? `${parts[0]}${parts.length > 1 ? ` ${parts.at(-1)[0]}.` : ''}` : 'Cliente'; }
 function renderTemplate(template, values) {
   return String(template).replace(/{{(nome|link_acesso|suporte)}}/g, (_, key) => String(values[key] || ''));
+}
+
+function httpError(status, message) {
+  return Object.assign(new Error(message), { status });
+}
+
+function summarizeWebhookEvent(row) {
+  let result = {};
+  try { result = JSON.parse(row.result || '{}'); } catch {}
+  const source = String(row.event_key || '').startsWith('import:') ? 'import' : 'webhook';
+  return {
+    source,
+    receivedAt: row.received_at,
+    processedAt: row.processed_at || null,
+    status: row.processed_at ? (result.ok === false ? 'rejected' : 'processed') : 'pending',
+    reason: result.reason || null,
+  };
 }
 
 function spreadsheetCell(value) {
@@ -96,6 +114,8 @@ async function approveOrderFromProvider(providerId) {
   const body = renderTemplate(settings.email_body, { nome: customer.name, link_acesso: accessUrl, suporte: settings.support_phone || 'não configurado' });
   await db.runQuery('INSERT OR IGNORE INTO email_jobs (id,order_id,recipient,subject,body,status,attempts,next_attempt_at,created_at) VALUES (?,?,?,?,?,\'pending\',0,?,?)',
     [security.randomId('mail'), order.id, customer.email, subject, body, approvedAt.toISOString(), approvedAt.toISOString()]);
+  adminEvents.publish('email.queued', { orderId: order.id, source: 'mercadopago' });
+  adminEvents.publish('purchase.approved', { orderId: order.id, plan: order.access_group_key || 'vip', source: 'mercadopago' });
   return { ok: true, orderId: order.id, accessUrl };
 }
 
@@ -104,7 +124,7 @@ async function grantAccess(order, customer) {
   const rawToken = security.randomToken();
   const approvedAt = new Date();
   const expiresAt = new Date(approvedAt.getTime() + 24 * 60 * 60 * 1000);
-  const changed = await db.runQuery("UPDATE orders SET status='approved', provider_status='confirmed', approved_at=?, redeem_token_hash=?, redeem_expires_at=?, updated_at=? WHERE id=? AND status!='approved'",
+  const changed = await db.runQuery("UPDATE orders SET status='approved', approved_at=?, redeem_token_hash=?, redeem_expires_at=?, updated_at=? WHERE id=? AND status!='approved'",
     [approvedAt.toISOString(), security.tokenHash(rawToken), expiresAt.toISOString(), approvedAt.toISOString(), order.id]);
   if (!changed.changes) return { ok: true, replay: true, orderId: order.id };
   const [settings] = await db.getQuery('SELECT * FROM commerce_settings WHERE id=1');
@@ -113,7 +133,40 @@ async function grantAccess(order, customer) {
   const body = renderTemplate(settings.email_body, { nome: customer.name, link_acesso: accessUrl, suporte: settings.support_phone || 'não configurado' });
   await db.runQuery('INSERT OR IGNORE INTO email_jobs (id,order_id,recipient,subject,body,status,attempts,next_attempt_at,created_at) VALUES (?,?,?,?,?,\'pending\',0,?,?)',
     [security.randomId('mail'), order.id, customer.email, subject, body, approvedAt.toISOString(), approvedAt.toISOString()]);
+  adminEvents.publish('email.queued', { orderId: order.id, source: 'lastlink' });
   return { ok: true, orderId: order.id, accessUrl };
+}
+
+async function queueOrderAccessEmail(orderId) {
+  const [order] = await db.getQuery(`SELECT o.*,c.name,c.email
+    FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?`, [orderId]);
+  if (!order) throw httpError(404, 'Pedido não encontrado.');
+  if (order.status !== 'approved') throw httpError(409, 'O acesso só pode ser enviado para uma compra aprovada.');
+  if (!smtpConfigured()) throw httpError(409, 'Configure o Brevo SMTP antes de enviar notificações.');
+
+  const [settings] = await db.getQuery('SELECT * FROM commerce_settings WHERE id=1');
+  if (!settings?.invite_url) throw httpError(409, 'Configure o convite do WhatsApp antes de gerar o acesso.');
+
+  const rawToken = security.randomToken();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const accessUrl = `${String(process.env.BASE_PUBLIC_URL || 'http://localhost:3000').replace(/\/$/, '')}/resgate/${rawToken}`;
+  const subject = renderTemplate(settings.email_subject, { nome: order.name, link_acesso: accessUrl, suporte: settings.support_phone });
+  const body = renderTemplate(settings.email_body, { nome: order.name, link_acesso: accessUrl, suporte: settings.support_phone || 'não configurado' });
+  const [existingJob] = await db.getQuery('SELECT id FROM email_jobs WHERE order_id=?', [order.id]);
+
+  await db.runQuery('UPDATE orders SET redeem_token_hash=?,redeem_expires_at=?,updated_at=? WHERE id=?',
+    [security.tokenHash(rawToken), expiresAt.toISOString(), now.toISOString(), order.id]);
+  if (existingJob) {
+    await db.runQuery("UPDATE email_jobs SET recipient=?,subject=?,body=?,status='pending',attempts=0,next_attempt_at=?,last_error=NULL,sent_at=NULL WHERE id=?",
+      [order.email, subject, body, now.toISOString(), existingJob.id]);
+  } else {
+    await db.runQuery("INSERT INTO email_jobs (id,order_id,recipient,subject,body,status,attempts,next_attempt_at,created_at) VALUES (?,?,?,?,?,'pending',0,?,?)",
+      [security.randomId('mail'), order.id, order.email, subject, body, now.toISOString(), now.toISOString()]);
+  }
+
+  adminEvents.publish('email.queued', { orderId: order.id, source: 'admin' });
+  return { ok: true, orderId: order.id, emailStatus: 'pending', expiresAt: expiresAt.toISOString() };
 }
 
 function registerCommerceRoutes(app) {
@@ -206,14 +259,17 @@ function registerCommerceRoutes(app) {
     catch (error) { if (/UNIQUE|PRIMARY/i.test(error.message)) return res.sendStatus(200); throw error; }
     try {
       if (['Payment_Refund', 'Payment_Chargeback'].includes(event.event)) {
-        await db.runQuery('UPDATE orders SET status=?,provider_status=?,updated_at=? WHERE provider_payment_id=?', [event.event === 'Payment_Refund' ? 'refunded' : 'chargeback', event.event, new Date().toISOString(), event.paymentId]);
+        const status = event.event === 'Payment_Refund' ? 'refunded' : 'chargeback';
+        await db.runQuery('UPDATE orders SET status=?,provider_status=?,updated_at=? WHERE provider_payment_id=?', [status, event.event, new Date().toISOString(), event.paymentId]);
         await db.runQuery('UPDATE webhook_events SET processed_at=?,result=? WHERE provider=\'lastlink\' AND event_key=?', [new Date().toISOString(), JSON.stringify({ ok: true, revoked: true }), event.eventId]);
+        adminEvents.publish('purchase.revoked', { status, source: 'lastlink' });
         return res.sendStatus(200);
       }
       const [settings] = await db.getQuery('SELECT * FROM commerce_settings WHERE id=1');
       const verified = lastlink.verifyPurchase(event, settings, plan);
       if (!verified.ok) {
         await db.runQuery('UPDATE webhook_events SET processed_at=?,result=? WHERE provider=\'lastlink\' AND event_key=?', [new Date().toISOString(), JSON.stringify(verified), event.eventId]);
+        adminEvents.publish('webhook.rejected', { reason: verified.reason, source: 'lastlink' });
         return res.status(422).json({ error: verified.reason });
       }
       const name = cleanText(event.buyer.name, 120), email = cleanText(event.buyer.email, 180).toLowerCase();
@@ -224,19 +280,22 @@ function registerCommerceRoutes(app) {
         const [existingCustomer] = await db.getQuery('SELECT id,name,email,phone FROM customers WHERE id=?', [existing.customer_id]);
         const recovered = await grantAccess(existing, existingCustomer);
         await db.runQuery('UPDATE webhook_events SET processed_at=?,result=? WHERE provider=\'lastlink\' AND event_key=?', [new Date().toISOString(), JSON.stringify({ ok: true, recovered: true, orderId: recovered.orderId }), event.eventId]);
+        adminEvents.publish('purchase.updated', { orderId: recovered.orderId, plan, source: 'lastlink' });
         return res.sendStatus(200);
       }
       const now = new Date().toISOString(), customerId = security.randomId('cus'), orderId = security.randomId('ord');
       const customer = { id: customerId, name, email, phone };
       await db.runQuery('INSERT INTO customers (id,name,email,cpf_encrypted,cpf_hash,cpf_mask,phone,terms_accepted_at,marketing_opt_in,created_at) VALUES (?,?,?,?,?,?,?,?,0,?)',
         [customerId, name, email, security.encryptCpf(cpf), security.hashCpf(cpf), security.maskCpf(cpf), phone, event.createdAt || now, now]);
-      await db.runQuery("INSERT INTO orders (id,customer_id,amount_cents,currency,status,provider_payment_id,provider_status,created_at,updated_at) VALUES (?,?,?,'BRL','pending',?,?,?,?)",
-        [orderId, customerId, event.amountCents, event.paymentId, `confirmed_${verified.plan}`, now, now]);
+      await db.runQuery("INSERT INTO orders (id,customer_id,access_group_key,amount_cents,currency,status,provider_payment_id,provider_status,created_at,updated_at) VALUES (?,?,?,?,'BRL','pending',?,?,?,?)",
+        [orderId, customerId, verified.plan, event.amountCents, event.paymentId, `confirmed_${verified.plan}`, now, now]);
       const result = await grantAccess({ id: orderId, status: 'pending' }, customer);
       await db.runQuery('UPDATE webhook_events SET processed_at=?,result=? WHERE provider=\'lastlink\' AND event_key=?', [new Date().toISOString(), JSON.stringify({ ok: true, orderId }), event.eventId]);
+      adminEvents.publish('purchase.approved', { orderId, plan: verified.plan, source: 'lastlink' });
       res.json({ ok: true, orderId: result.orderId });
     } catch (error) {
       await db.runQuery('DELETE FROM webhook_events WHERE provider=\'lastlink\' AND event_key=? AND processed_at IS NULL', [event.eventId]).catch(() => {});
+      adminEvents.publish('webhook.failed', { source: 'lastlink' });
       res.sendStatus(500);
     }
   });
@@ -288,12 +347,40 @@ function registerCommerceRoutes(app) {
   app.get('/api/admin/session', security.requireAdmin, (req, res) => res.json({ authenticated: true, csrf: req.adminSession.csrf }));
   app.post('/api/admin/logout', security.requireAdmin, (req, res) => { security.sessions.delete(req.adminSession.token); res.setHeader('Set-Cookie', 'gm_admin=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly'); res.json({ ok: true }); });
 
+  app.get('/api/admin/events', security.requireAdmin, (req, res) => {
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const send = event => res.write(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`);
+    const unsubscribe = adminEvents.subscribe(send);
+    send({ id: `connected-${Date.now()}`, type: 'connected', at: new Date().toISOString() });
+    const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 20_000);
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+      res.end();
+    });
+  });
+
   app.get('/api/admin/overview', security.requireAdmin, async (_req, res) => {
-    const [[settings], buyers, offers, emailJobs] = await Promise.all([
+    const [[settings], buyers, offers, emailJobs, webhookEvents] = await Promise.all([
       db.getQuery('SELECT * FROM commerce_settings WHERE id=1'),
-      db.getQuery(`SELECT o.id,o.amount_cents,o.currency,o.status,o.provider_status,o.approved_at,o.redeem_expires_at,o.created_at,c.name,c.email,c.cpf_mask,c.phone,c.marketing_opt_in,
-        e.status email_status,e.attempts email_attempts,e.last_error email_error FROM orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN email_jobs e ON e.order_id=o.id ORDER BY o.created_at DESC LIMIT 100`),
+      db.getQuery(`SELECT o.id,o.amount_cents,o.currency,o.status,o.provider_status,o.access_group_key,o.approved_at,o.redeem_expires_at,o.created_at,o.updated_at,
+        c.name,c.email,c.cpf_mask,c.phone,c.marketing_opt_in,e.status email_status,e.attempts email_attempts,e.last_error email_error,
+        e.sent_at email_sent_at,e.next_attempt_at email_next_attempt_at,
+        CASE WHEN o.redeem_token_hash IS NOT NULL THEN 1 ELSE 0 END has_redeem,
+        CASE WHEN o.access_group_key='clube' OR o.provider_status='confirmed_clube' THEN 'clube' ELSE 'vip' END plan_key,
+        CASE WHEN imported_event.event_key IS NOT NULL THEN 'import' WHEN o.provider_status LIKE 'confirmed%' THEN 'lastlink' ELSE 'manual' END purchase_source
+        FROM orders o JOIN customers c ON c.id=o.customer_id
+        LEFT JOIN email_jobs e ON e.order_id=o.id
+        LEFT JOIN webhook_events imported_event ON imported_event.provider='lastlink' AND imported_event.event_key=('import:' || o.provider_payment_id)
+        ORDER BY o.created_at DESC LIMIT 100`),
       db.getQuery('SELECT * FROM store_offers ORDER BY created_at DESC LIMIT 100'), db.getQuery('SELECT status,COUNT(*) count FROM email_jobs GROUP BY status'),
+      db.getQuery("SELECT event_key,received_at,processed_at,result FROM webhook_events WHERE provider='lastlink' ORDER BY received_at DESC LIMIT 25"),
     ]);
     const vipCheckout = !!(process.env.LASTLINK_VIP_CHECKOUT_URL || process.env.LASTLINK_CHECKOUT_URL);
     const clubeCheckout = !!process.env.LASTLINK_CLUBE_CHECKOUT_URL;
@@ -301,13 +388,28 @@ function registerCommerceRoutes(app) {
     const clubeWebhook = !!process.env.LASTLINK_CLUBE_WEBHOOK_SECRET;
     const vipProduct = !!(process.env.LASTLINK_VIP_OFFER_ID || process.env.LASTLINK_VIP_PRODUCT_ID || vipCheckout);
     const clubeProduct = !!(process.env.LASTLINK_CLUBE_OFFER_ID || process.env.LASTLINK_CLUBE_PRODUCT_ID || clubeCheckout);
-    res.json({ settings, buyers, offers, emailJobs, integrations: {
+    const summarizedEvents = webhookEvents.map(summarizeWebhookEvent);
+    res.json({ settings, buyers, offers, emailJobs, diagnostics: {
+      serverTime: new Date().toISOString(),
+      realtime: adminEvents.getStatus(),
+      emailWorker: getEmailWorkerStatus(),
+      latestWebhook: summarizedEvents.find(event => event.source === 'webhook') || null,
+      latestImport: summarizedEvents.find(event => event.source === 'import') || null,
+    }, integrations: {
       lastlinkCheckout: vipCheckout && clubeCheckout,
       lastlinkWebhook: vipWebhook && clubeWebhook,
       lastlinkProduct: vipProduct && clubeProduct,
       smtp: smtpConfigured(),
       aiResearch: !!(process.env.NVIDIA_API_KEY && process.env.NVIDIA_TEXT_MODEL && process.env.NVIDIA_VISION_MODEL),
     } });
+  });
+
+  app.post('/api/admin/orders/:id/email', security.requireAdmin, async (req, res) => {
+    try {
+      res.status(202).json(await queueOrderAccessEmail(cleanText(req.params.id, 100)));
+    } catch (error) {
+      res.status(error.status || 500).json({ error: error.status ? error.message : 'Não foi possível preparar o email de acesso.' });
+    }
   });
 
   app.get('/api/admin/offers/export.csv', security.requireAdmin, async (_req, res) => {
@@ -362,8 +464,8 @@ function registerCommerceRoutes(app) {
 
       const orderId = security.randomId('ord');
       try {
-        await db.runQuery("INSERT INTO orders (id,customer_id,amount_cents,currency,status,provider_payment_id,provider_status,approved_at,redeem_expires_at,created_at,updated_at) VALUES (?,?,?,'BRL','approved',?,?,?, ?,?,?)",
-          [orderId, customer.id, amountCents, paymentId, `confirmed_${plan}`, approvedAt, inviteExpiresAt, approvedAt, approvedAt]);
+        await db.runQuery("INSERT INTO orders (id,customer_id,access_group_key,amount_cents,currency,status,provider_payment_id,provider_status,approved_at,redeem_expires_at,created_at,updated_at) VALUES (?,?,?,?, 'BRL','approved',?,?,?,?,?,?)",
+          [orderId, customer.id, plan, amountCents, paymentId, `confirmed_${plan}`, approvedAt, inviteExpiresAt, approvedAt, approvedAt]);
         await db.runQuery("INSERT OR IGNORE INTO webhook_events(provider,event_key,received_at,processed_at,result) VALUES ('lastlink',?,?,?,?)",
           [`import:${paymentId}`, approvedAt, new Date().toISOString(), JSON.stringify({ ok: true, imported: true, orderId })]);
         result.imported += 1;
@@ -374,6 +476,7 @@ function registerCommerceRoutes(app) {
       }
     }
 
+    if (result.imported) adminEvents.publish('purchases.imported', { count: result.imported, source: 'import' });
     res.json(result);
   });
 

@@ -161,10 +161,77 @@ test('importa vendas aprovadas da Lastlink sem duplicar nem disparar email', asy
   const first = await (await request()).json(); const second = await (await request()).json();
   assert.equal(first.imported, 1, JSON.stringify(first)); assert.equal(first.skipped, 0);
   assert.equal(second.imported, 0); assert.equal(second.skipped, 1);
-  const [order] = await db.getQuery('SELECT status,provider_status,approved_at FROM orders WHERE provider_payment_id=?', [sale.paymentId]);
-  assert.equal(order.status, 'approved'); assert.equal(order.provider_status, 'confirmed_vip'); assert.equal(order.approved_at, sale.purchasedAt);
+  const [order] = await db.getQuery('SELECT id,status,provider_status,access_group_key,approved_at FROM orders WHERE provider_payment_id=?', [sale.paymentId]);
+  assert.equal(order.status, 'approved'); assert.equal(order.provider_status, 'confirmed_vip'); assert.equal(order.access_group_key, 'vip'); assert.equal(order.approved_at, sale.purchasedAt);
   const [{ count }] = await db.getQuery('SELECT COUNT(*) count FROM email_jobs WHERE order_id=(SELECT id FROM orders WHERE provider_payment_id=?)', [sale.paymentId]);
   assert.equal(count, 0);
+  const overview = await (await fetch(`${base}/api/admin/overview`, { headers: { cookie } })).json();
+  const imported = overview.buyers.find(buyer => buyer.id === order.id);
+  assert.equal(imported.purchase_source, 'import');
+  assert.equal(imported.plan_key, 'vip');
+  assert.equal(imported.email_status, null);
+});
+
+test('webhook Lastlink do Clube aprova sem perder plano e agenda email', async t => {
+  await db.ready;
+  process.env.LASTLINK_CLUBE_CHECKOUT_URL = 'https://lastlink.com/p/CCLUBE/checkout-payment/';
+  process.env.LASTLINK_CLUBE_WEBHOOK_SECRET = 'clube-webhook-secret';
+  process.env.LASTLINK_STRICT_AMOUNT_VALIDATION = 'false';
+  await db.runQuery("UPDATE commerce_settings SET invite_url='https://chat.whatsapp.com/InviteClub',support_phone='5511999999999',email_subject='Seu acesso {{nome}}',email_body='Entre aqui {{link_acesso}}' WHERE id=1");
+  const server = app.listen(0); t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const paymentId = `club-live-${Date.now()}`;
+  const body = {
+    Id: `evt-club-${Date.now()}`,
+    Event: 'Purchase_Order_Confirmed',
+    CreatedAt: '2026-09-13T03:00:00.000Z',
+    Data: {
+      Buyer: { Name: 'Cliente Clube', Email: 'clube@example.com', PhoneNumber: '+5511999999999', Document: '529.982.247-25' },
+      Offer: { Url: 'https://lastlink.com/p/CCLUBE/checkout-payment/' },
+      Purchase: { PaymentId: paymentId, Price: { Value: 197.00 }, Payment: { PaymentMethod: 'pix' } },
+    },
+  };
+  const response = await fetch(`${base}/api/webhooks/lastlink`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-lastlink-secret': 'clube-webhook-secret' },
+    body: JSON.stringify(body),
+  });
+  assert.equal(response.status, 200, await response.text());
+  const [order] = await db.getQuery('SELECT id,status,provider_status,access_group_key FROM orders WHERE provider_payment_id=?', [paymentId]);
+  assert.equal(order.status, 'approved');
+  assert.equal(order.provider_status, 'confirmed_clube');
+  assert.equal(order.access_group_key, 'clube');
+  const [{ count }] = await db.getQuery('SELECT COUNT(*) count FROM email_jobs WHERE order_id=?', [order.id]);
+  assert.equal(count, 1);
+  delete process.env.LASTLINK_CLUBE_CHECKOUT_URL;
+  delete process.env.LASTLINK_CLUBE_WEBHOOK_SECRET;
+  delete process.env.LASTLINK_STRICT_AMOUNT_VALIDATION;
+});
+
+test('admin pode gerar email de acesso para venda historica aprovada', async t => {
+  await db.ready;
+  process.env.BREVO_SMTP_LOGIN = 'login';
+  process.env.BREVO_SMTP_KEY = 'key';
+  process.env.EMAIL_FROM = 'Loja <loja@example.com>';
+  await db.runQuery("UPDATE commerce_settings SET invite_url='https://chat.whatsapp.com/InviteManual',support_phone='5511999999999',email_subject='Acesso {{nome}}',email_body='Link {{link_acesso}} suporte {{suporte}}' WHERE id=1");
+  const now = new Date().toISOString(), customerId = security.randomId('cus'), orderId = security.randomId('ord');
+  await db.runQuery('INSERT INTO customers(id,name,email,cpf_encrypted,cpf_hash,cpf_mask,phone,terms_accepted_at,marketing_opt_in,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)', [customerId, 'Historico Email', 'manual@example.com', security.encryptCpf('52998224725'), security.hashCpf('52998224725'), security.maskCpf('52998224725'), '11999999999', now, 0, now]);
+  await db.runQuery("INSERT INTO orders(id,customer_id,access_group_key,amount_cents,status,provider_payment_id,provider_status,approved_at,created_at,updated_at) VALUES(?,?,?,9700,'approved','manual-email-test','confirmed_vip',?,?,?)", [orderId, customerId, 'vip', now, now, now]);
+  const server = app.listen(0); t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = await fetch(`${base}/api/admin/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: process.env.ADMIN_PASSWORD }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0]; const { csrf } = await login.json();
+  const response = await fetch(`${base}/api/admin/orders/${orderId}/email`, { method: 'POST', headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf }, body: '{}' });
+  assert.equal(response.status, 202, await response.text());
+  const [job] = await db.getQuery('SELECT status,attempts FROM email_jobs WHERE order_id=?', [orderId]);
+  const [order] = await db.getQuery('SELECT redeem_token_hash,redeem_expires_at FROM orders WHERE id=?', [orderId]);
+  assert.equal(job.status, 'pending');
+  assert.equal(job.attempts, 0);
+  assert.ok(order.redeem_token_hash);
+  assert.ok(order.redeem_expires_at);
+  delete process.env.BREVO_SMTP_LOGIN;
+  delete process.env.BREVO_SMTP_KEY;
+  delete process.env.EMAIL_FROM;
 });
 
 test('painel reconhece as integrações separadas dos dois planos Lastlink', async t => {
