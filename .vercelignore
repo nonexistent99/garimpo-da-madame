@@ -1,0 +1,16 @@
+.env
+.env.*
+node_modules/
+data/
+src/
+tests/
+deploy/
+.netlify/
+.vercel/
+*.log
+Dockerfile
+railway.json
+netlify.toml
+package.json
+package-lock.json
+publish.js
