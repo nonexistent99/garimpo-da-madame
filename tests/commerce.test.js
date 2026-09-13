@@ -211,6 +211,24 @@ test('webhook Lastlink do Clube aprova sem perder plano e agenda email', async t
   delete process.env.LASTLINK_STRICT_AMOUNT_VALIDATION;
 });
 
+test('importa venda histórica sem telefone quando CPF e demais dados estão válidos', async t => {
+  await db.ready;
+  const server = app.listen(0); t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = await fetch(`${base}/api/admin/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: process.env.ADMIN_PASSWORD }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0]; const { csrf } = await login.json();
+  const paymentId = `historical-no-phone-${Date.now()}`;
+  const response = await fetch(`${base}/api/admin/import/lastlink-sales`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+    body: JSON.stringify({ sales: [{ paymentId, name: 'Cliente Sem Telefone', email: 'semtelefone@example.com', cpf: '11144477735', phone: '', amountCents: 9700, plan: 'vip', purchasedAt: '2026-09-13T12:00:00-03:00' }] }),
+  });
+  const result = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(result.imported, 1, JSON.stringify(result));
+  const [order] = await db.getQuery('SELECT c.phone FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.provider_payment_id=?', [paymentId]);
+  assert.equal(order.phone, '');
+});
+
 test('webhook Lastlink ignora eventos sem compra com resposta de sucesso', async t => {
   await db.ready;
   process.env.LASTLINK_VIP_WEBHOOK_SECRET = 'vip-webhook-secret';

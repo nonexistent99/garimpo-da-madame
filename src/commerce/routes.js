@@ -454,7 +454,7 @@ function registerCommerceRoutes(app) {
       const purchasedAt = new Date(sale.purchasedAt || '');
 
       if (!paymentId || name.length < 3 || !validEmail(email) || !security.isCpfShapeValid(cpf)
-        || phone.length < 10 || !Number.isInteger(amountCents) || amountCents < 1
+        || (phone && phone.length < 10) || !Number.isInteger(amountCents) || amountCents < 1
         || Number.isNaN(purchasedAt.getTime())) {
         result.rejected.push({ row: index + 2, reason: 'Dados obrigatórios inválidos.' });
         continue;
