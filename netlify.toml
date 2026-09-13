@@ -1,5 +1,27 @@
 [build]
   publish = "public"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/webhooks/lastlink"
+  to = "/.netlify/functions/lastlink-webhook"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/admin/overview"
+  to = "/.netlify/functions/admin-overview"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/staff/cpf-lookup"
+  to = "/.netlify/functions/staff-cpf-lookup"
+  status = 200
+  force = true
 
 [[redirects]]
   from = "/api/*"

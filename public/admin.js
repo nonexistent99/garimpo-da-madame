@@ -162,7 +162,7 @@ function normalizeOverview(overview) {
 }
 
 function notifyNewApprovedOrders(previousBuyers, currentBuyers) {
-  if (!previousBuyers || realtimeConnected) return;
+  if (!previousBuyers) return;
   const knownIds = new Set(previousBuyers.map(order => order.id));
   const newOrders = currentBuyers.filter(order => order.status === 'approved' && !knownIds.has(order.id));
   if (!newOrders.length) return;
@@ -354,7 +354,7 @@ function buyerTableRow(order) {
 
 function buyerCard(order, index) {
   const email = emailState(order);
-  const canQueue = order.status === 'approved' && Boolean(state?.diagnostics);
+  const canQueue = order.status === 'approved' && Boolean(state?.capabilities?.orderEmailRecovery);
   return `
     <article class="order-card" style="--index:${Number(index) || 0}">
       <div class="order-customer">
