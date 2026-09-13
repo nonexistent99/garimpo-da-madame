@@ -5,6 +5,8 @@ let csrf = '';
 let state = null;
 let waPoll = null;
 let realtimeSource = null;
+let realtimeConnected = false;
+let realtimeFailures = 0;
 let fallbackTimer = null;
 let refreshPromise = null;
 let realtimeRefreshTimer = null;
@@ -122,7 +124,9 @@ async function refresh({ forceSettings = false, silent = false } = {}) {
   if (refreshPromise) return refreshPromise;
   refreshPromise = (async () => {
     try {
-      state = await api('/api/admin/overview');
+      const previousBuyers = state?.buyers || null;
+      state = normalizeOverview(await api('/api/admin/overview'));
+      notifyNewApprovedOrders(previousBuyers, state.buyers);
       fillSettings({ force: forceSettings });
       renderMetrics();
       renderDiagnostics();
@@ -139,6 +143,35 @@ async function refresh({ forceSettings = false, silent = false } = {}) {
     }
   })();
   return refreshPromise;
+}
+
+function normalizeOverview(overview) {
+  return {
+    ...overview,
+    buyers: (overview.buyers || []).map(order => {
+      const providerStatus = String(order.provider_status || '').toLowerCase();
+      const historicalImport = /^confirmed_(vip|clube)$/.test(providerStatus) && !order.email_status;
+      return {
+        ...order,
+        plan_key: order.plan_key || (providerStatus.includes('clube') ? 'clube' : 'vip'),
+        has_redeem: order.has_redeem ?? Boolean(order.redeem_expires_at),
+        purchase_source: order.purchase_source || (historicalImport ? 'import' : providerStatus.includes('confirmed') ? 'lastlink' : 'manual'),
+      };
+    }),
+  };
+}
+
+function notifyNewApprovedOrders(previousBuyers, currentBuyers) {
+  if (!previousBuyers || realtimeConnected) return;
+  const knownIds = new Set(previousBuyers.map(order => order.id));
+  const newOrders = currentBuyers.filter(order => order.status === 'approved' && !knownIds.has(order.id));
+  if (!newOrders.length) return;
+  toast(newOrders.length === 1 ? 'Nova compra aprovada.' : `${newOrders.length} novas compras aprovadas.`, 'success');
+  if (browserAlerts && 'Notification' in window && Notification.permission === 'granted') {
+    new Notification('Garimpo da Madame', {
+      body: newOrders.length === 1 ? 'Uma nova compra entrou no painel.' : `${newOrders.length} novas compras entraram no painel.`,
+    });
+  }
 }
 
 function updateLastUpdated() {
@@ -249,6 +282,11 @@ function renderMetrics() {
 
 function renderDiagnostics() {
   const diagnostics = state?.diagnostics || {};
+  if (!state?.diagnostics) {
+    setDiagnosticText('emailDiagnostic', 'emailDetail', state?.integrations?.smtp ? 'SMTP configurado' : 'SMTP pendente', 'Backend atual sem telemetria detalhada do worker.');
+    setDiagnosticText('webhookDiagnostic', 'webhookDetail', state?.integrations?.lastlinkWebhook ? 'Webhook configurado' : 'Webhook pendente', 'Painel em modo compativel com atualizacao a cada 10 segundos.');
+    return;
+  }
   const worker = diagnostics.emailWorker || {};
   const webhook = diagnostics.latestWebhook;
   const imported = diagnostics.latestImport;
@@ -316,7 +354,7 @@ function buyerTableRow(order) {
 
 function buyerCard(order, index) {
   const email = emailState(order);
-  const canQueue = order.status === 'approved';
+  const canQueue = order.status === 'approved' && Boolean(state?.diagnostics);
   return `
     <article class="order-card" style="--index:${Number(index) || 0}">
       <div class="order-customer">
@@ -497,8 +535,22 @@ function connectRealtime() {
   }
   realtimeSource?.close();
   realtimeSource = new EventSource('/api/admin/events');
-  realtimeSource.onopen = () => setRealtimeStatus('live', 'Compras e emails chegam em tempo real');
-  realtimeSource.onerror = () => setRealtimeStatus('warn', 'Tentando reconectar automaticamente');
+  realtimeSource.onopen = () => {
+    realtimeConnected = true;
+    realtimeFailures = 0;
+    setRealtimeStatus('live', 'Compras e emails chegam em tempo real');
+  };
+  realtimeSource.onerror = () => {
+    realtimeConnected = false;
+    realtimeFailures += 1;
+    if (realtimeFailures >= 2) {
+      realtimeSource?.close();
+      realtimeSource = null;
+      setRealtimeStatus('warn', 'Atualizacao automatica a cada 10 segundos');
+      return;
+    }
+    setRealtimeStatus('warn', 'Tentando conectar; polling continua ativo');
+  };
   realtimeSource.onmessage = event => {
     const payload = JSON.parse(event.data || '{}');
     if (payload.type === 'connected') return;
@@ -508,7 +560,7 @@ function connectRealtime() {
 
 function startFallbackPolling() {
   clearInterval(fallbackTimer);
-  fallbackTimer = setInterval(() => refresh({ silent: true }), 15000);
+  fallbackTimer = setInterval(() => refresh({ silent: true }), 10000);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) refresh({ silent: true });
   });
