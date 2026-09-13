@@ -1,5 +1,5 @@
 [build]
-  publish = ".netlify-publish"
+  publish = "public"
 
 [[redirects]]
   from = "/api/*"
