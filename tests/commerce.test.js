@@ -141,6 +141,22 @@ test('importa vendas aprovadas da Lastlink sem duplicar nem disparar email', asy
   assert.equal(count, 0);
 });
 
+test('painel reconhece as integrações separadas dos dois planos Lastlink', async t => {
+  await db.ready;
+  process.env.LASTLINK_VIP_CHECKOUT_URL = 'https://lastlink.com/p/CVIP/checkout-payment/';
+  process.env.LASTLINK_CLUBE_CHECKOUT_URL = 'https://lastlink.com/p/CCLUBE/checkout-payment/';
+  process.env.LASTLINK_VIP_WEBHOOK_SECRET = 'vip-webhook-secret';
+  process.env.LASTLINK_CLUBE_WEBHOOK_SECRET = 'clube-webhook-secret';
+  const server = app.listen(0); t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = await fetch(`${base}/api/admin/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: process.env.ADMIN_PASSWORD }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const overview = await (await fetch(`${base}/api/admin/overview`, { headers: { cookie } })).json();
+  assert.deepEqual({ checkout: overview.integrations.lastlinkCheckout, webhook: overview.integrations.lastlinkWebhook, product: overview.integrations.lastlinkProduct }, { checkout: true, webhook: true, product: true });
+  delete process.env.LASTLINK_VIP_CHECKOUT_URL; delete process.env.LASTLINK_CLUBE_CHECKOUT_URL;
+  delete process.env.LASTLINK_VIP_WEBHOOK_SECRET; delete process.env.LASTLINK_CLUBE_WEBHOOK_SECRET;
+});
+
 test('fila de email agenda retry sem afetar pedido', async () => {
   process.env.BREVO_SMTP_LOGIN='login';process.env.BREVO_SMTP_KEY='key';process.env.EMAIL_FROM='Loja <loja@example.com>';
   const id=security.randomId('mail'),now=new Date().toISOString();

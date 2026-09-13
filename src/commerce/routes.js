@@ -295,7 +295,19 @@ function registerCommerceRoutes(app) {
         e.status email_status,e.attempts email_attempts,e.last_error email_error FROM orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN email_jobs e ON e.order_id=o.id ORDER BY o.created_at DESC LIMIT 100`),
       db.getQuery('SELECT * FROM store_offers ORDER BY created_at DESC LIMIT 100'), db.getQuery('SELECT status,COUNT(*) count FROM email_jobs GROUP BY status'),
     ]);
-    res.json({ settings, buyers, offers, emailJobs, integrations: { lastlinkCheckout: !!process.env.LASTLINK_CHECKOUT_URL, lastlinkWebhook: !!process.env.LASTLINK_WEBHOOK_SECRET, lastlinkProduct: !!(process.env.LASTLINK_OFFER_ID || process.env.LASTLINK_PRODUCT_ID), smtp: smtpConfigured(), aiResearch: !!(process.env.NVIDIA_API_KEY && process.env.NVIDIA_TEXT_MODEL && process.env.NVIDIA_VISION_MODEL) } });
+    const vipCheckout = !!(process.env.LASTLINK_VIP_CHECKOUT_URL || process.env.LASTLINK_CHECKOUT_URL);
+    const clubeCheckout = !!process.env.LASTLINK_CLUBE_CHECKOUT_URL;
+    const vipWebhook = !!(process.env.LASTLINK_VIP_WEBHOOK_SECRET || process.env.LASTLINK_WEBHOOK_SECRET);
+    const clubeWebhook = !!process.env.LASTLINK_CLUBE_WEBHOOK_SECRET;
+    const vipProduct = !!(process.env.LASTLINK_VIP_OFFER_ID || process.env.LASTLINK_VIP_PRODUCT_ID || vipCheckout);
+    const clubeProduct = !!(process.env.LASTLINK_CLUBE_OFFER_ID || process.env.LASTLINK_CLUBE_PRODUCT_ID || clubeCheckout);
+    res.json({ settings, buyers, offers, emailJobs, integrations: {
+      lastlinkCheckout: vipCheckout && clubeCheckout,
+      lastlinkWebhook: vipWebhook && clubeWebhook,
+      lastlinkProduct: vipProduct && clubeProduct,
+      smtp: smtpConfigured(),
+      aiResearch: !!(process.env.NVIDIA_API_KEY && process.env.NVIDIA_TEXT_MODEL && process.env.NVIDIA_VISION_MODEL),
+    } });
   });
 
   app.get('/api/admin/offers/export.csv', security.requireAdmin, async (_req, res) => {
