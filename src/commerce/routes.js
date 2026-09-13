@@ -393,7 +393,7 @@ function registerCommerceRoutes(app) {
         FROM orders o JOIN customers c ON c.id=o.customer_id
         LEFT JOIN email_jobs e ON e.order_id=o.id
         LEFT JOIN webhook_events imported_event ON imported_event.provider='lastlink' AND imported_event.event_key=('import:' || o.provider_payment_id)
-        ORDER BY o.created_at DESC LIMIT 100`),
+        ORDER BY o.created_at DESC LIMIT 500`),
       db.getQuery('SELECT * FROM store_offers ORDER BY created_at DESC LIMIT 100'), db.getQuery('SELECT status,COUNT(*) count FROM email_jobs GROUP BY status'),
       db.getQuery("SELECT event_key,received_at,processed_at,result FROM webhook_events WHERE provider='lastlink' ORDER BY received_at DESC LIMIT 25"),
     ]);

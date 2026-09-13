@@ -22,7 +22,7 @@ export default async function handler(request, response) {
   if (!dataKey) return response.status(200).setHeader('Cache-Control', 'no-store').json(overview);
   const recent = (await listJson('orders/')).map(order => publicOrder(order, dataKey)).sort((left, right) => new Date(right.created_at) - new Date(left.created_at));
   const existingIds = new Set((overview.buyers || []).map(order => order.id));
-  overview.buyers = [...recent.filter(order => !existingIds.has(order.id)), ...(overview.buyers || [])].sort((left, right) => new Date(right.created_at) - new Date(left.created_at)).slice(0, 100);
+  overview.buyers = [...recent.filter(order => !existingIds.has(order.id)), ...(overview.buyers || [])].sort((left, right) => new Date(right.created_at) - new Date(left.created_at)).slice(0, 500);
   overview.capabilities = { adminRealtime: false, orderEmailRecovery: false, vercelLastlink: true };
   overview.diagnostics = {
     latestWebhook: recent[0] ? { status: 'Compra recebida', reason: recent[0].plan_key === 'clube' ? 'Clube Socio' : 'VIP Garimpo', receivedAt: recent[0].created_at } : null,
