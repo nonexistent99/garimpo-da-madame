@@ -1,6 +1,7 @@
 import { getStore } from '@netlify/blobs';
 import { encryptJson, hmacHex, safeEqual } from './_shared/crypto.mjs';
 import { cpfKey, eventKey, extractLastlink, maskCpf, paymentKey, safeDate, validatePurchase } from './_shared/lastlink.mjs';
+import { relay, upstream } from './_shared/upstream.mjs';
 
 const json = (value, status = 200) => new Response(JSON.stringify(value), {
   status,
@@ -31,7 +32,12 @@ export default async (request: Request) => {
   if (request.method !== 'POST') return json({ error: 'Metodo nao permitido.' }, 405);
   const rawBody = await request.text();
   const plan = authenticate(request, rawBody);
-  if (!plan) return json({ error: 'Webhook nao autorizado.' }, 401);
+  if (!plan) {
+    // Durante a transição, as credenciais podem estar apenas no Railway. Repassar
+    // o evento preserva a validação do backend sem aceitar nada localmente.
+    const url = new URL(request.url);
+    return relay(await upstream(request, `/api/webhooks/lastlink${url.search}`, rawBody));
+  }
 
   let payload;
   try { payload = JSON.parse(rawBody); } catch { return json({ error: 'JSON invalido.' }, 400); }

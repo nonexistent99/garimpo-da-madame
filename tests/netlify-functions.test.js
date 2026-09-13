@@ -32,3 +32,25 @@ test('protege CPF e dados pessoais no armazenamento', async () => {
   assert.equal(lastlink.cpfKey('529.982.247-25', key).includes('52998224725'), false);
   assert.equal(cryptoHelper.hmacHex('payload', 'token').length, 64);
 });
+
+test('encaminha autenticação da Lastlink ao backend durante a transição', async t => {
+  const helper = await load('netlify/functions/_shared/upstream.mjs');
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  let received;
+  global.fetch = async (url, options) => {
+    received = { url, headers: Object.fromEntries(options.headers), body: options.body };
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  await helper.upstream(
+    new Request('https://garimpo-da-madame.netlify.app/api/webhooks/lastlink?secret=teste', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-lastlink-signature': 'assinatura' },
+    }),
+    '/api/webhooks/lastlink?secret=teste',
+    '{"evento":"teste"}',
+  );
+  assert.match(received.url, /\/api\/webhooks\/lastlink\?secret=teste$/);
+  assert.equal(received.headers['x-lastlink-signature'], 'assinatura');
+  assert.equal(received.body, '{"evento":"teste"}');
+});

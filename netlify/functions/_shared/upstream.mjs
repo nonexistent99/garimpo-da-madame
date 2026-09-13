@@ -2,7 +2,11 @@ const UPSTREAM = 'https://garimpo-api-production.up.railway.app';
 
 export async function upstream(request, path, body) {
   const headers = new Headers();
-  for (const name of ['accept', 'content-type', 'cookie', 'x-csrf-token']) {
+  for (const name of [
+    'accept', 'content-type', 'cookie', 'x-csrf-token',
+    'x-lastlink-secret', 'x-lastlink-token', 'x-lastlink-signature',
+    'x-hub-signature-256', 'authorization',
+  ]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
