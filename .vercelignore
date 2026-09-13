@@ -11,6 +11,4 @@ deploy/
 Dockerfile
 railway.json
 netlify.toml
-package.json
-package-lock.json
 publish.js

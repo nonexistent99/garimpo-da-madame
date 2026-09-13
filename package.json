@@ -12,6 +12,7 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@netlify/blobs": "^11.0.3",
+    "@vercel/blob": "^2.6.1",
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "axios": "^1.20.0",
     "cheerio": "^1.2.0",

@@ -1,8 +1,18 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": null,
-  "outputDirectory": "public",
   "rewrites": [
+    {
+      "source": "/api/webhooks/lastlink",
+      "destination": "/api/lastlink-webhook"
+    },
+    {
+      "source": "/api/admin/overview",
+      "destination": "/api/admin-overview"
+    },
+    {
+      "source": "/api/staff/cpf-lookup",
+      "destination": "/api/staff-cpf-lookup"
+    },
     {
       "source": "/api/:path*",
       "destination": "https://garimpo-api-production.up.railway.app/api/:path*"

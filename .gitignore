@@ -16,3 +16,4 @@ test-github-temp.js
 .netlify-cli-fresh/
 .vercel/
 .railway-stage-*/
+.env.local
