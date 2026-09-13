@@ -83,7 +83,9 @@ function verifyPurchase(event, settings, plan = 'standard') {
   if (!Number.isInteger(event.amountCents) || event.amountCents <= 0) return { ok: false, reason: 'amount_missing' };
   // A Lastlink pode aplicar cupom no checkout. Nos planos separados, o próprio
   // segredo e o código da oferta identificam o produto; o valor final é o pago.
-  if (!matchesPlanCheckout(event, plan)) return { ok: false, reason: 'checkout_mismatch' };
+  // Cada plano usa um segredo próprio. A URL recebida pode continuar apontando
+  // para uma versão anterior da oferta depois de uma troca de checkout.
+  if (process.env.LASTLINK_STRICT_CHECKOUT_VALIDATION === 'true' && !matchesPlanCheckout(event, plan)) return { ok: false, reason: 'checkout_mismatch' };
   if ((plan === 'standard' || process.env.LASTLINK_STRICT_AMOUNT_VALIDATION === 'true') && event.amountCents !== expectedAmount) return { ok: false, reason: 'amount_mismatch' };
   return { ok: true, plan };
 }

@@ -56,9 +56,12 @@ test('valida compra única da Lastlink por oferta, produto e valor', () => {
 test('aceita valor promocional no plano autenticado e bloqueia checkout de outro plano', () => {
   process.env.LASTLINK_VIP_CHECKOUT_URL = 'https://lastlink.com/p/CVIP12345/checkout-payment/';
   process.env.LASTLINK_STRICT_AMOUNT_VALIDATION = 'false';
+  process.env.LASTLINK_STRICT_CHECKOUT_VALIDATION = 'true';
   const event = lastlink.extract({ Id: 'evt-vip', Event: 'Purchase_Order_Confirmed', Data: { Buyer: { Name: 'Cliente Teste', Email: 'cliente@example.com', PhoneNumber: '+5511999999999', Document: '529.982.247-25' }, Offer: { Url: 'https://lastlink.com/p/CVIP12345/checkout-payment/' }, Purchase: { PaymentId: 'pay-vip', Price: { Value: 24.25 } } } });
   assert.equal(lastlink.verifyPurchase(event, { price_cents: 9700 }, 'vip').ok, true);
   assert.equal(lastlink.verifyPurchase({ ...event, offerUrl: 'https://lastlink.com/p/COUTRO999/checkout-payment/' }, { price_cents: 9700 }, 'vip').reason, 'checkout_mismatch');
+  delete process.env.LASTLINK_STRICT_CHECKOUT_VALIDATION;
+  assert.equal(lastlink.verifyPurchase({ ...event, offerUrl: 'https://lastlink.com/p/COUTRO999/checkout-payment/' }, { price_cents: 9700 }, 'vip').ok, true);
   delete process.env.LASTLINK_VIP_CHECKOUT_URL; delete process.env.LASTLINK_STRICT_AMOUNT_VALIDATION;
 });
 

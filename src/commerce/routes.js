@@ -36,11 +36,12 @@ function summarizeWebhookEvent(row) {
   let result = {};
   try { result = JSON.parse(row.result || '{}'); } catch {}
   const source = String(row.event_key || '').startsWith('import:') ? 'import' : 'webhook';
+  const ignored = result.reason === 'event_not_supported';
   return {
     source,
     receivedAt: row.received_at,
     processedAt: row.processed_at || null,
-    status: row.processed_at ? (result.ok === false ? 'rejected' : 'processed') : 'pending',
+    status: row.processed_at ? (ignored ? 'ignored' : result.ok === false ? 'rejected' : 'processed') : 'pending',
     reason: result.reason || null,
   };
 }
@@ -52,7 +53,7 @@ function summarizeWebhookHistory(events) {
     const reason = event.reason || (event.status === 'processed' ? 'accepted' : 'unknown');
     summary.reasons[reason] = (summary.reasons[reason] || 0) + 1;
     return summary;
-  }, { total: 0, processed: 0, rejected: 0, pending: 0, reasons: {} });
+  }, { total: 0, processed: 0, ignored: 0, rejected: 0, pending: 0, reasons: {} });
 }
 
 function spreadsheetCell(value) {
