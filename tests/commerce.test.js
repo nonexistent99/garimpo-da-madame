@@ -208,6 +208,24 @@ test('webhook Lastlink do Clube aprova sem perder plano e agenda email', async t
   delete process.env.LASTLINK_STRICT_AMOUNT_VALIDATION;
 });
 
+test('webhook Lastlink ignora eventos sem compra com resposta de sucesso', async t => {
+  await db.ready;
+  process.env.LASTLINK_VIP_WEBHOOK_SECRET = 'vip-webhook-secret';
+  const server = app.listen(0); t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const eventId = `invoice-${Date.now()}`;
+  const response = await fetch(`${base}/api/webhooks/lastlink`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-lastlink-secret': 'vip-webhook-secret' },
+    body: JSON.stringify({ Id: eventId, Event: 'Purchase_Request_Confirmed', IsTest: false, Data: {} }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, ignored: true });
+  const [event] = await db.getQuery("SELECT processed_at,result FROM webhook_events WHERE provider='lastlink' AND event_key=?", [eventId]);
+  assert.ok(event.processed_at);
+  assert.equal(JSON.parse(event.result).reason, 'event_not_supported');
+});
+
 test('admin pode gerar email de acesso para venda historica aprovada', async t => {
   await db.ready;
   process.env.BREVO_SMTP_LOGIN = 'login';

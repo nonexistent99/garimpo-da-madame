@@ -45,6 +45,16 @@ function summarizeWebhookEvent(row) {
   };
 }
 
+function summarizeWebhookHistory(events) {
+  return events.reduce((summary, event) => {
+    summary.total += 1;
+    summary[event.status] = (summary[event.status] || 0) + 1;
+    const reason = event.reason || (event.status === 'processed' ? 'accepted' : 'unknown');
+    summary.reasons[reason] = (summary.reasons[reason] || 0) + 1;
+    return summary;
+  }, { total: 0, processed: 0, rejected: 0, pending: 0, reasons: {} });
+}
+
 function spreadsheetCell(value) {
   let text = String(value ?? '').replace(/\0/g, '').replace(/\r?\n/g, ' ');
   if (/^[=+\-@]/.test(text)) text = `'${text}`;
@@ -269,6 +279,10 @@ function registerCommerceRoutes(app) {
       const verified = lastlink.verifyPurchase(event, settings, plan);
       if (!verified.ok) {
         await db.runQuery('UPDATE webhook_events SET processed_at=?,result=? WHERE provider=\'lastlink\' AND event_key=?', [new Date().toISOString(), JSON.stringify(verified), event.eventId]);
+        if (verified.reason === 'event_not_supported') {
+          adminEvents.publish('webhook.ignored', { reason: verified.reason, source: 'lastlink' });
+          return res.json({ ok: true, ignored: true });
+        }
         adminEvents.publish('webhook.rejected', { reason: verified.reason, source: 'lastlink' });
         return res.status(422).json({ error: verified.reason });
       }
@@ -395,6 +409,7 @@ function registerCommerceRoutes(app) {
       emailWorker: getEmailWorkerStatus(),
       latestWebhook: summarizedEvents.find(event => event.source === 'webhook') || null,
       latestImport: summarizedEvents.find(event => event.source === 'import') || null,
+      webhookSummary: summarizeWebhookHistory(summarizedEvents.filter(event => event.source === 'webhook')),
     }, integrations: {
       lastlinkCheckout: vipCheckout && clubeCheckout,
       lastlinkWebhook: vipWebhook && clubeWebhook,
