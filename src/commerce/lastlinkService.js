@@ -23,6 +23,24 @@ function webhookPlan(secret) {
   return null;
 }
 
+function checkoutCode(value) {
+  try {
+    const parts = new URL(value).pathname.split('/').filter(Boolean);
+    const index = parts.findIndex(part => part.toLowerCase() === 'p');
+    return index >= 0 && parts[index + 1] ? parts[index + 1].toUpperCase() : '';
+  } catch { return ''; }
+}
+
+function matchesPlanCheckout(event, plan) {
+  if (plan === 'standard') return true;
+  const configured = plan === 'vip'
+    ? process.env.LASTLINK_VIP_CHECKOUT_URL || process.env.LASTLINK_CHECKOUT_URL
+    : process.env.LASTLINK_CLUBE_CHECKOUT_URL;
+  const expectedCode = checkoutCode(configured || '');
+  const receivedCode = checkoutCode(event.offerUrl || '');
+  return !expectedCode || expectedCode === receivedCode;
+}
+
 function extract(payload) {
   const data = read(payload, 'Data', 'data') || {};
   const buyer = read(data, 'Buyer', 'buyer') || {};
@@ -62,7 +80,11 @@ function verifyPurchase(event, settings, plan = 'standard') {
   if (expectedOffer && event.offerId !== expectedOffer) return { ok: false, reason: 'offer_mismatch' };
   if (expectedProduct && !event.productIds.includes(expectedProduct)) return { ok: false, reason: 'product_mismatch' };
   if (plan === 'standard' && !expectedOffer && !expectedProduct) return { ok: false, reason: 'product_not_configured' };
-  if (!Number.isInteger(event.amountCents) || event.amountCents !== expectedAmount) return { ok: false, reason: 'amount_mismatch' };
+  if (!Number.isInteger(event.amountCents) || event.amountCents <= 0) return { ok: false, reason: 'amount_missing' };
+  // A Lastlink pode aplicar cupom no checkout. Nos planos separados, o próprio
+  // segredo e o código da oferta identificam o produto; o valor final é o pago.
+  if (!matchesPlanCheckout(event, plan)) return { ok: false, reason: 'checkout_mismatch' };
+  if ((plan === 'standard' || process.env.LASTLINK_STRICT_AMOUNT_VALIDATION === 'true') && event.amountCents !== expectedAmount) return { ok: false, reason: 'amount_mismatch' };
   return { ok: true, plan };
 }
 
@@ -74,4 +96,4 @@ function checkoutConfigured() {
   } catch { return false; }
 }
 
-module.exports = { safeEqual, webhookSecret, webhookPlan, extract, verifyPurchase, checkoutConfigured };
+module.exports = { safeEqual, webhookSecret, webhookPlan, extract, verifyPurchase, checkoutConfigured, checkoutCode };
