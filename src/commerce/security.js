@@ -13,10 +13,9 @@ function normalizeCpf(value) { return String(value || '').replace(/\D/g, ''); }
 function isCpfShapeValid(value) {
   const cpf = normalizeCpf(value);
   if (cpf.length !== 11 || /^(\d)\1{10}$/.test(cpf)) return false;
-  for (let factor = 10; factor >= 9; factor--) {
-    const length = factor === 10 ? 9 : 10;
+  for (let length = 9; length <= 10; length++) {
     let sum = 0;
-    for (let i = 0; i < length; i++) sum += Number(cpf[i]) * (factor - i);
+    for (let i = 0; i < length; i++) sum += Number(cpf[i]) * (length + 1 - i);
     const digit = (sum * 10) % 11 % 10;
     if (digit !== Number(cpf[length])) return false;
   }

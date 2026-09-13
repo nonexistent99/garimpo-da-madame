@@ -19,6 +19,12 @@ const { approveOrderFromProvider, buildOffersCsv } = require('../src/commerce/ro
 const lastlink = require('../src/commerce/lastlinkService');
 const app = require('../src/server');
 
+test('valida corretamente os dois dígitos do CPF', () => {
+  assert.equal(security.isCpfShapeValid('529.982.247-25'), true);
+  assert.equal(security.isCpfShapeValid('529.982.247-24'), false);
+  assert.equal(security.isCpfShapeValid('111.111.111-11'), false);
+});
+
 test('rejeita fraude de valor, moeda, pedido e recebedor', () => {
   process.env.MERCADO_PAGO_COLLECTOR_ID = 'seller-1';
   const order = { id: 'ord_1', amount_cents: 2990, currency: 'BRL' };
@@ -116,6 +122,23 @@ test('exportação inclui informações adicionais e neutraliza fórmulas', () =
   assert.match(csv, /"'=PRODUTO"/);
   assert.match(csv, /"1499,90"/);
   assert.match(csv, /https:\/\/example\.com/);
+});
+
+test('importa vendas aprovadas da Lastlink sem duplicar nem disparar email', async t => {
+  await db.ready;
+  const server = app.listen(0); t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = await fetch(`${base}/api/admin/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: process.env.ADMIN_PASSWORD }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0]; const { csrf } = await login.json();
+  const sale = { paymentId: `historical-${Date.now()}`, name: 'Cliente Histórico', email: 'historico@example.com', cpf: '52998224725', phone: '11999999999', amountCents: 9700, plan: 'vip', purchasedAt: '2026-09-13T02:30:00.000Z' };
+  const request = () => fetch(`${base}/api/admin/import/lastlink-sales`, { method: 'POST', headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf }, body: JSON.stringify({ sales: [sale] }) });
+  const first = await (await request()).json(); const second = await (await request()).json();
+  assert.equal(first.imported, 1, JSON.stringify(first)); assert.equal(first.skipped, 0);
+  assert.equal(second.imported, 0); assert.equal(second.skipped, 1);
+  const [order] = await db.getQuery('SELECT status,provider_status,approved_at FROM orders WHERE provider_payment_id=?', [sale.paymentId]);
+  assert.equal(order.status, 'approved'); assert.equal(order.provider_status, 'confirmed_vip'); assert.equal(order.approved_at, sale.purchasedAt);
+  const [{ count }] = await db.getQuery('SELECT COUNT(*) count FROM email_jobs WHERE order_id=(SELECT id FROM orders WHERE provider_payment_id=?)', [sale.paymentId]);
+  assert.equal(count, 0);
 });
 
 test('fila de email agenda retry sem afetar pedido', async () => {

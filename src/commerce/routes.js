@@ -307,6 +307,64 @@ function registerCommerceRoutes(app) {
     res.send(buildOffersCsv(offers));
   });
 
+  app.post('/api/admin/import/lastlink-sales', security.requireAdmin, async (req, res) => {
+    const sales = Array.isArray(req.body.sales) ? req.body.sales.slice(0, 500) : [];
+    if (!sales.length) return res.status(422).json({ error: 'Envie ao menos uma venda para importar.' });
+
+    const result = { imported: 0, skipped: 0, rejected: [] };
+    for (let index = 0; index < sales.length; index += 1) {
+      const sale = sales[index] || {};
+      const paymentId = cleanText(sale.paymentId, 160);
+      const name = cleanText(sale.name, 120);
+      const email = cleanText(sale.email, 180).toLowerCase();
+      const cpf = security.normalizeCpf(sale.cpf);
+      const phone = String(sale.phone || '').replace(/\D/g, '').slice(0, 15);
+      const amountCents = Number(sale.amountCents);
+      const plan = sale.plan === 'clube' ? 'clube' : 'vip';
+      const purchasedAt = new Date(sale.purchasedAt || '');
+
+      if (!paymentId || name.length < 3 || !validEmail(email) || !security.isCpfShapeValid(cpf)
+        || phone.length < 10 || !Number.isInteger(amountCents) || amountCents < 1
+        || Number.isNaN(purchasedAt.getTime())) {
+        result.rejected.push({ row: index + 2, reason: 'Dados obrigatórios inválidos.' });
+        continue;
+      }
+
+      const [existingOrder] = await db.getQuery('SELECT id FROM orders WHERE provider_payment_id=?', [paymentId]);
+      if (existingOrder) {
+        result.skipped += 1;
+        continue;
+      }
+
+      const approvedAt = purchasedAt.toISOString();
+      const inviteExpiresAt = new Date(purchasedAt.getTime() + 24 * 60 * 60 * 1000).toISOString();
+      const cpfHash = security.hashCpf(cpf);
+      let [customer] = await db.getQuery('SELECT id FROM customers WHERE cpf_hash=? ORDER BY created_at DESC LIMIT 1', [cpfHash]);
+      let createdCustomer = false;
+      if (!customer) {
+        customer = { id: security.randomId('cus') };
+        await db.runQuery('INSERT INTO customers (id,name,email,cpf_encrypted,cpf_hash,cpf_mask,phone,terms_accepted_at,marketing_opt_in,created_at) VALUES (?,?,?,?,?,?,?,?,0,?)',
+          [customer.id, name, email, security.encryptCpf(cpf), cpfHash, security.maskCpf(cpf), phone, approvedAt, approvedAt]);
+        createdCustomer = true;
+      }
+
+      const orderId = security.randomId('ord');
+      try {
+        await db.runQuery("INSERT INTO orders (id,customer_id,amount_cents,currency,status,provider_payment_id,provider_status,approved_at,redeem_expires_at,created_at,updated_at) VALUES (?,?,?,'BRL','approved',?,?,?, ?,?,?)",
+          [orderId, customer.id, amountCents, paymentId, `confirmed_${plan}`, approvedAt, inviteExpiresAt, approvedAt, approvedAt]);
+        await db.runQuery("INSERT OR IGNORE INTO webhook_events(provider,event_key,received_at,processed_at,result) VALUES ('lastlink',?,?,?,?)",
+          [`import:${paymentId}`, approvedAt, new Date().toISOString(), JSON.stringify({ ok: true, imported: true, orderId })]);
+        result.imported += 1;
+      } catch (error) {
+        if (createdCustomer) await db.runQuery('DELETE FROM customers WHERE id=?', [customer.id]).catch(() => {});
+        if (/UNIQUE|PRIMARY/i.test(error.message)) result.skipped += 1;
+        else result.rejected.push({ row: index + 2, reason: 'Falha ao salvar a venda.' });
+      }
+    }
+
+    res.json(result);
+  });
+
   app.put('/api/admin/settings', security.requireAdmin, async (req, res) => {
     const [current] = await db.getQuery('SELECT * FROM commerce_settings WHERE id=1');
     const price = req.body.priceCents === null || req.body.priceCents === '' ? null : Number(req.body.priceCents);
