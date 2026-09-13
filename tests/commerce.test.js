@@ -78,6 +78,32 @@ test('protege APIs legadas, mascara CPF e exige CSRF', async t => {
   assert.ok(csrf);
 });
 
+test('salva campos válidos mesmo quando a ativação está incompleta', async t => {
+  await db.ready;
+  await db.runQuery("UPDATE commerce_settings SET access_name='Nome anterior',sales_status='paused',price_cents=NULL,invite_url=NULL,support_phone=NULL WHERE id=1");
+  const server = app.listen(0); t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = await fetch(`${base}/api/admin/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ password: process.env.ADMIN_PASSWORD }),
+  });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const { csrf } = await login.json();
+  const save = await fetch(`${base}/api/admin/settings`, {
+    method: 'PUT',
+    headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf },
+    body: JSON.stringify({ accessName: 'VIP atualizado', salesStatus: 'active' }),
+  });
+  assert.equal(save.status, 200);
+  const result = await save.json();
+  assert.equal(result.partial, true);
+  assert.match(result.fieldErrors.salesStatus, /vendas continuam pausadas/i);
+  const [settings] = await db.getQuery('SELECT access_name,sales_status FROM commerce_settings WHERE id=1');
+  assert.equal(settings.access_name, 'VIP atualizado');
+  assert.equal(settings.sales_status, 'paused');
+});
+
 test('token inválido e expirado nunca revelam convite', async t => {
   await db.ready; await db.runQuery("UPDATE commerce_settings SET invite_url='https://chat.whatsapp.com/TestInvite123' WHERE id=1");
   const now = new Date().toISOString(), cid = security.randomId('cus'), oid = security.randomId('ord'), token = security.randomToken();

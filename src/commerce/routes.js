@@ -379,20 +379,60 @@ function registerCommerceRoutes(app) {
 
   app.put('/api/admin/settings', security.requireAdmin, async (req, res) => {
     const [current] = await db.getQuery('SELECT * FROM commerce_settings WHERE id=1');
-    const price = req.body.priceCents === null || req.body.priceCents === '' ? null : Number(req.body.priceCents);
-    const status = ['active', 'paused'].includes(req.body.salesStatus) ? req.body.salesStatus : 'paused';
-    const invite = cleanText(req.body.inviteUrl, 400);
-    const supportPhone = String(req.body.supportPhone || '').replace(/\D/g, '').slice(0, 15);
-    if (price !== null && (!Number.isInteger(price) || price < 100)) return res.status(422).json({ error: 'Preço inválido.' });
-    if (status === 'active' && (!lastlink.checkoutConfigured() || !/^https:\/\//.test(process.env.BASE_PUBLIC_URL || ''))) return res.status(409).json({ error: 'Configure checkout, webhook e produto da Lastlink antes de abrir vendas.' });
-    if (!validInvite(invite)) return res.status(422).json({ error: 'Use um link de convite válido do WhatsApp.' });
-    if (!cleanText(req.body.accessName, 120) || !cleanText(req.body.accessDescription, 500) || !cleanText(req.body.emailSubject, 180) || !cleanText(req.body.emailBody, 3000)) return res.status(422).json({ error: 'Nome, descrição e textos de email são obrigatórios.' });
-    if (status === 'active' && (!price || !invite || supportPhone.length < 10 || !smtpConfigured())) return res.status(409).json({ error: 'Defina preço, convite, suporte e SMTP Brevo antes de abrir vendas.' });
+    if (!current) return res.status(503).json({ error: 'As configurações ainda não foram inicializadas.' });
+    const has = field => Object.prototype.hasOwnProperty.call(req.body, field);
+    const fieldErrors = {};
+    const next = {
+      accessName: current.access_name, accessDescription: current.access_description,
+      priceCents: current.price_cents, salesStatus: current.sales_status,
+      inviteUrl: current.invite_url || '', supportPhone: current.support_phone || '',
+      destinationGroupId: current.destination_group_id || '', emailSubject: current.email_subject,
+      emailBody: current.email_body,
+    };
+    for (const [field, limit, message] of [
+      ['accessName', 120, 'Informe o nome do acesso.'],
+      ['accessDescription', 500, 'Informe a descrição do acesso.'],
+      ['emailSubject', 180, 'Informe o assunto do e-mail.'],
+      ['emailBody', 3000, 'Informe o texto do e-mail.'],
+    ]) {
+      if (!has(field)) continue;
+      const value = cleanText(req.body[field], limit);
+      if (value) next[field] = value;
+      else fieldErrors[field] = message;
+    }
+    if (has('priceCents')) {
+      const rawPrice = req.body.priceCents;
+      const price = rawPrice === null || rawPrice === '' ? null : Number(rawPrice);
+      if (price !== null && (!Number.isInteger(price) || price < 100)) fieldErrors.price = 'Informe um preço válido a partir de R$ 1,00.';
+      else next.priceCents = price;
+    }
+    if (has('inviteUrl')) {
+      const invite = cleanText(req.body.inviteUrl, 400);
+      if (!validInvite(invite)) fieldErrors.inviteUrl = 'Use um link válido iniciado por https://chat.whatsapp.com/.';
+      else next.inviteUrl = invite;
+    }
+    if (has('supportPhone')) next.supportPhone = String(req.body.supportPhone || '').replace(/\D/g, '').slice(0, 15);
+    if (has('destinationGroupId')) next.destinationGroupId = cleanText(req.body.destinationGroupId, 120);
+    const requestedStatus = has('salesStatus') && ['active', 'paused'].includes(req.body.salesStatus) ? req.body.salesStatus : next.salesStatus;
+    next.salesStatus = requestedStatus;
+    if (requestedStatus === 'active') {
+      const missing = [];
+      if (!lastlink.checkoutConfigured() || !/^https:\/\//.test(process.env.BASE_PUBLIC_URL || '')) missing.push('Lastlink');
+      if (!next.priceCents) missing.push('preço');
+      if (!next.inviteUrl) missing.push('convite do WhatsApp');
+      if (next.supportPhone.length < 10) missing.push('WhatsApp do suporte');
+      if (!smtpConfigured()) missing.push('Brevo SMTP');
+      if (missing.length) {
+        next.salesStatus = 'paused';
+        fieldErrors.salesStatus = `Os outros dados foram salvos, mas as vendas continuam pausadas. Falta configurar: ${missing.join(', ')}.`;
+      }
+    }
     const now = new Date().toISOString();
-    if (invite !== (current.invite_url || '')) await db.runQuery('INSERT INTO invite_history(id,invite_url,changed_at,changed_by) VALUES (?,?,?,\'admin\')', [security.randomId('inv'), invite || null, now]);
+    if (next.inviteUrl !== (current.invite_url || '')) await db.runQuery('INSERT INTO invite_history(id,invite_url,changed_at,changed_by) VALUES (?,?,?,\'admin\')', [security.randomId('inv'), next.inviteUrl || null, now]);
     await db.runQuery(`UPDATE commerce_settings SET access_name=?,access_description=?,price_cents=?,sales_status=?,invite_url=?,support_phone=?,destination_group_id=?,email_subject=?,email_body=?,updated_at=? WHERE id=1`,
-      [cleanText(req.body.accessName, 120), cleanText(req.body.accessDescription, 500), price, status, invite || null, supportPhone, cleanText(req.body.destinationGroupId, 120), cleanText(req.body.emailSubject, 180), cleanText(req.body.emailBody, 3000), now]);
-    res.json({ ok: true });
+      [next.accessName, next.accessDescription, next.priceCents, next.salesStatus, next.inviteUrl || null, next.supportPhone, next.destinationGroupId, next.emailSubject, next.emailBody, now]);
+    res.json({ ok: true, partial: Object.keys(fieldErrors).length > 0, fieldErrors,
+      message: Object.keys(fieldErrors).length ? 'Os dados válidos foram salvos. Confira os campos destacados.' : 'Configurações salvas.' });
   });
   app.get('/api/admin/invite-history', security.requireAdmin, async (_req, res) => res.json(await db.getQuery('SELECT * FROM invite_history ORDER BY changed_at DESC LIMIT 50')));
 

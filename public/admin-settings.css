@@ -1,0 +1,21 @@
+#settingsForm input[aria-invalid="true"],
+#settingsForm textarea[aria-invalid="true"],
+#settingsForm select[aria-invalid="true"] {
+  border-color: #b00042;
+  box-shadow: 0 0 0 3px rgba(176, 0, 66, 0.12);
+}
+
+#settingsForm .field-error {
+  color: #b00042;
+  font-weight: 700;
+}
+
+#settingsStatus.success {
+  color: #08783f;
+  font-weight: 700;
+}
+
+#settingsStatus.warning-status {
+  color: #7a5700;
+  font-weight: 700;
+}
