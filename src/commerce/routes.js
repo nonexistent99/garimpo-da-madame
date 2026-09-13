@@ -17,10 +17,12 @@ const upload = multer({
   fileFilter: (_req, file, cb) => cb(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)),
 });
 const loginAttempts = new Map();
+const staffLoginAttempts = new Map();
 
 function cleanText(value, max = 200) { return String(value || '').trim().slice(0, max); }
 function validEmail(value) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value); }
 function validInvite(value) { return !value || /^https:\/\/(chat\.)?whatsapp\.com\/[A-Za-z0-9_-]+/.test(value); }
+function maskName(value) { const parts = cleanText(value, 120).split(/\s+/).filter(Boolean); return parts.length ? `${parts[0]}${parts.length > 1 ? ` ${parts.at(-1)[0]}.` : ''}` : 'Cliente'; }
 function renderTemplate(template, values) {
   return String(template).replace(/{{(nome|link_acesso|suporte)}}/g, (_, key) => String(values[key] || ''));
 }
@@ -237,6 +239,37 @@ function registerCommerceRoutes(app) {
       await db.runQuery('DELETE FROM webhook_events WHERE provider=\'lastlink\' AND event_key=? AND processed_at IS NULL', [event.eventId]).catch(() => {});
       res.sendStatus(500);
     }
+  });
+
+  app.post('/api/staff/login', (req, res) => {
+    const ip = req.ip; const attempt = staffLoginAttempts.get(ip) || { count: 0, until: 0 };
+    if (attempt.until > Date.now()) return res.status(429).json({ error: 'Muitas tentativas. Aguarde alguns minutos.' });
+    const username = cleanText(req.body.username, 80);
+    const expectedUsername = process.env.STAFF_PORTAL_USERNAME || '';
+    const expectedPassword = process.env.STAFF_PORTAL_PASSWORD || '';
+    if (expectedUsername.length < 3 || expectedPassword.length < 12) return res.status(503).json({ error: 'Acesso das atendentes ainda não configurado.' });
+    if (!security.safeEqual(username, expectedUsername) || !security.safeEqual(req.body.password, expectedPassword)) {
+      attempt.count += 1; if (attempt.count >= 5) { attempt.until = Date.now() + 15 * 60_000; attempt.count = 0; } staffLoginAttempts.set(ip, attempt);
+      return res.status(401).json({ error: 'Usuário ou senha inválidos.' });
+    }
+    staffLoginAttempts.delete(ip); const session = security.createStaffSession();
+    res.setHeader('Set-Cookie', `gm_staff=${session.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`);
+    res.json({ csrf: session.csrf });
+  });
+  app.get('/api/staff/session', security.requireStaff, (req, res) => res.json({ authenticated: true, csrf: req.staffSession.csrf }));
+  app.post('/api/staff/logout', security.requireStaff, (req, res) => { security.staffSessions.delete(req.staffSession.token); res.setHeader('Set-Cookie', 'gm_staff=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly'); res.json({ ok: true }); });
+  app.post('/api/staff/cpf-lookup', security.requireStaff, async (req, res) => {
+    const cpf = security.normalizeCpf(req.body.cpf);
+    if (!security.isCpfShapeValid(cpf)) return res.status(422).json({ error: 'Informe um CPF válido.' });
+    const rows = await db.getQuery(`SELECT c.name,o.status,o.provider_status,o.approved_at,o.redeem_expires_at,o.created_at
+      FROM customers c JOIN orders o ON o.customer_id=c.id WHERE c.cpf_hash=? ORDER BY o.created_at DESC LIMIT 1`, [security.hashCpf(cpf)]);
+    const order = rows[0];
+    if (!order) return res.json({ found: false });
+    const purchasedAt = new Date(order.approved_at || order.created_at);
+    const validUntil = new Date(purchasedAt); validUntil.setFullYear(validUntil.getFullYear() + 1);
+    const active = order.status === 'approved' && validUntil > new Date();
+    const plan = order.provider_status === 'confirmed_clube' ? 'Clube Sócio' : 'VIP Garimpo';
+    res.json({ found: true, customer: maskName(order.name), cpfLastFive: cpf.slice(-5), plan, status: active ? 'ativo' : 'inativo', purchasedAt: purchasedAt.toISOString(), validUntil: validUntil.toISOString(), invitePageExpiresAt: order.redeem_expires_at || null });
   });
 
   app.post('/api/admin/login', (req, res) => {

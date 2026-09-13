@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 
 const sessions = new Map();
+const staffSessions = new Map();
 
 function secretKey() {
   const value = process.env.APP_SECRET;
@@ -73,6 +74,33 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+function createStaffSession() {
+  const token = crypto.randomBytes(32).toString('base64url');
+  const csrf = crypto.randomBytes(24).toString('base64url');
+  staffSessions.set(token, { csrf, expiresAt: Date.now() + 8 * 60 * 60 * 1000 });
+  return { token, csrf };
+}
+
+function getStaffSession(req) {
+  const token = parseCookies(req.headers.cookie).gm_staff;
+  const session = token && staffSessions.get(token);
+  if (!session || session.expiresAt <= Date.now()) {
+    if (token) staffSessions.delete(token);
+    return null;
+  }
+  return { token, ...session };
+}
+
+function requireStaff(req, res, next) {
+  const session = getStaffSession(req);
+  if (!session) return res.status(401).json({ error: 'Autenticação de atendente necessária.' });
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.headers['x-csrf-token'] !== session.csrf) {
+    return res.status(403).json({ error: 'Token CSRF inválido.' });
+  }
+  req.staffSession = session;
+  next();
+}
+
 function safeEqual(a, b) {
   const left = Buffer.from(String(a || ''));
   const right = Buffer.from(String(b || ''));
@@ -83,4 +111,4 @@ function randomId(prefix) { return `${prefix}_${crypto.randomBytes(12).toString(
 function randomToken() { return crypto.randomBytes(32).toString('base64url'); }
 function tokenHash(token) { return crypto.createHash('sha256').update(token).digest('hex'); }
 
-module.exports = { createSession, getSession, requireAdmin, safeEqual, normalizeCpf, encryptCpf, hashCpf, maskCpf, isCpfShapeValid, randomId, randomToken, tokenHash, sessions };
+module.exports = { createSession, getSession, requireAdmin, createStaffSession, getStaffSession, requireStaff, safeEqual, normalizeCpf, encryptCpf, hashCpf, maskCpf, isCpfShapeValid, randomId, randomToken, tokenHash, sessions, staffSessions };

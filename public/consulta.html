@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow"><title>Consulta de benefícios | Garimpo da Madame</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Barlow+Condensed:wght@500;700;800&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/consulta.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead"><p>GARIMPO DA MADAME</p><h1>Consulta de benefícios</h1><span>Uso interno da equipe</span></header>
+    <section id="loginView" class="panel login-panel" hidden>
+      <p class="kicker">EQUIPE DA LOJA</p><h2>Entrar</h2><form id="loginForm"><label>Usuário<input id="username" autocomplete="username" required></label><label>Senha<input id="password" type="password" autocomplete="current-password" required></label><button class="action" type="submit">ACESSAR CONSULTA <b>→</b></button><p id="loginStatus" class="status" role="status"></p></form></section>
+    <section id="appView" hidden>
+      <div class="panel lookup-panel"><div><p class="kicker">VALIDAÇÃO DE CLIENTE</p><h2>Consultar pelo CPF</h2><p>Informe o CPF completo para verificar o plano e a validade. O sistema não exibe o documento completo.</p></div><form id="lookupForm"><label for="cpf">CPF do cliente<input id="cpf" inputmode="numeric" autocomplete="off" placeholder="000.000.000-00" required></label><button class="action" type="submit">VERIFICAR <b>→</b></button><button id="logout" class="text-action" type="button">Sair</button></form></div>
+      <section id="result" class="result" aria-live="polite" hidden></section>
+    </section>
+  </main>
+  <script src="/consulta.js"></script>
+</body>
+</html>

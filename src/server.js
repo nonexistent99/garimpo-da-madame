@@ -43,6 +43,7 @@ app.use(express.static(path.join(__dirname, '../public'), {
 }));
 
 app.get('/admin', (_req, res) => res.sendFile(path.join(__dirname, '../public/admin.html')));
+app.get('/consulta', (_req, res) => res.sendFile(path.join(__dirname, '../public/consulta.html')));
 app.get('/resgate/:token', (_req, res) => res.sendFile(path.join(__dirname, '../public/redeem.html')));
 
 // GET /health
