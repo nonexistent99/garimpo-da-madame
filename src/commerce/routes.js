@@ -7,6 +7,7 @@ const lastlink = require('./lastlinkService');
 const { smtpConfigured, getEmailWorkerStatus } = require('./emailService');
 const adminEvents = require('./adminEvents');
 const { processOffer, publishOffer, analyzeRealPhoto } = require('./offerService');
+const { notifyApprovedSale } = require('./pushcut');
 
 const uploadDir = process.env.UPLOAD_DIR
   ? path.resolve(process.env.UPLOAD_DIR)
@@ -127,6 +128,7 @@ async function approveOrderFromProvider(providerId) {
     [security.randomId('mail'), order.id, customer.email, subject, body, approvedAt.toISOString(), approvedAt.toISOString()]);
   adminEvents.publish('email.queued', { orderId: order.id, source: 'mercadopago' });
   adminEvents.publish('purchase.approved', { orderId: order.id, plan: order.access_group_key || 'vip', source: 'mercadopago' });
+  notifyApprovedSale({ plan: order.access_group_key || 'vip', amountCents: order.amount_cents, source: 'mercadopago' }).catch(() => {});
   return { ok: true, orderId: order.id, accessUrl };
 }
 
@@ -145,6 +147,7 @@ async function grantAccess(order, customer) {
   await db.runQuery('INSERT OR IGNORE INTO email_jobs (id,order_id,recipient,subject,body,status,attempts,next_attempt_at,created_at) VALUES (?,?,?,?,?,\'pending\',0,?,?)',
     [security.randomId('mail'), order.id, customer.email, subject, body, approvedAt.toISOString(), approvedAt.toISOString()]);
   adminEvents.publish('email.queued', { orderId: order.id, source: 'lastlink' });
+  notifyApprovedSale({ plan: order.access_group_key || 'vip', amountCents: order.amount_cents, source: 'lastlink' }).catch(() => {});
   return { ok: true, orderId: order.id, accessUrl };
 }
 
@@ -304,7 +307,12 @@ function registerCommerceRoutes(app) {
         [customerId, name, email, security.encryptCpf(cpf), security.hashCpf(cpf), security.maskCpf(cpf), phone, event.createdAt || now, now]);
       await db.runQuery("INSERT INTO orders (id,customer_id,access_group_key,amount_cents,currency,status,provider_payment_id,provider_status,created_at,updated_at) VALUES (?,?,?,?,'BRL','pending',?,?,?,?)",
         [orderId, customerId, verified.plan, event.amountCents, event.paymentId, `confirmed_${verified.plan}`, now, now]);
-      const result = await grantAccess({ id: orderId, status: 'pending' }, customer);
+      const result = await grantAccess({
+        id: orderId,
+        status: 'pending',
+        amount_cents: event.amountCents,
+        access_group_key: verified.plan,
+      }, customer);
       await db.runQuery('UPDATE webhook_events SET processed_at=?,result=? WHERE provider=\'lastlink\' AND event_key=?', [new Date().toISOString(), JSON.stringify({ ok: true, orderId }), event.eventId]);
       adminEvents.publish('purchase.approved', { orderId, plan: verified.plan, source: 'lastlink' });
       res.json({ ok: true, orderId: result.orderId });
