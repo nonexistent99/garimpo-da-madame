@@ -390,7 +390,7 @@ function registerCommerceRoutes(app) {
   });
 
   app.get('/api/admin/overview', security.requireAdmin, async (_req, res) => {
-    const [[settings], buyers, offers, emailJobs, webhookEvents] = await Promise.all([
+    const [[settings], buyers, offers, emailJobs, webhookEvents, [metrics]] = await Promise.all([
       db.getQuery('SELECT * FROM commerce_settings WHERE id=1'),
       db.getQuery(`SELECT o.id,o.amount_cents,o.currency,o.status,o.provider_status,o.access_group_key,o.approved_at,o.redeem_expires_at,o.created_at,o.updated_at,
         c.name,c.email,c.cpf_mask,c.phone,c.marketing_opt_in,e.status email_status,e.attempts email_attempts,e.last_error email_error,
@@ -404,6 +404,12 @@ function registerCommerceRoutes(app) {
         ORDER BY o.created_at DESC LIMIT 500`),
       db.getQuery('SELECT * FROM store_offers ORDER BY created_at DESC LIMIT 100'), db.getQuery('SELECT status,COUNT(*) count FROM email_jobs GROUP BY status'),
       db.getQuery("SELECT event_key,received_at,processed_at,result FROM webhook_events WHERE provider='lastlink' ORDER BY received_at DESC LIMIT 25"),
+      db.getQuery(`SELECT
+        COALESCE(SUM(CASE WHEN status='approved' THEN amount_cents ELSE 0 END), 0) AS total_received_cents,
+        COALESCE(SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END), 0) AS approved_count,
+        COALESCE(SUM(CASE WHEN status='approved' AND (access_group_key='clube' OR provider_status='confirmed_clube') THEN 1 ELSE 0 END), 0) AS clube_count,
+        COALESCE(SUM(CASE WHEN status='approved' AND NOT (access_group_key='clube' OR provider_status='confirmed_clube') THEN 1 ELSE 0 END), 0) AS vip_count
+        FROM orders`),
     ]);
     const vipCheckout = !!(process.env.LASTLINK_VIP_CHECKOUT_URL || process.env.LASTLINK_CHECKOUT_URL);
     const clubeCheckout = !!process.env.LASTLINK_CLUBE_CHECKOUT_URL;
@@ -412,7 +418,12 @@ function registerCommerceRoutes(app) {
     const vipProduct = !!(process.env.LASTLINK_VIP_OFFER_ID || process.env.LASTLINK_VIP_PRODUCT_ID || vipCheckout);
     const clubeProduct = !!(process.env.LASTLINK_CLUBE_OFFER_ID || process.env.LASTLINK_CLUBE_PRODUCT_ID || clubeCheckout);
     const summarizedEvents = webhookEvents.map(summarizeWebhookEvent);
-    res.json({ settings, buyers, offers, emailJobs, diagnostics: {
+    res.json({ settings, buyers, offers, emailJobs, metrics: {
+      totalReceivedCents: Number(metrics?.total_received_cents || 0),
+      approvedCount: Number(metrics?.approved_count || 0),
+      vipCount: Number(metrics?.vip_count || 0),
+      clubeCount: Number(metrics?.clube_count || 0),
+    }, diagnostics: {
       serverTime: new Date().toISOString(),
       realtime: adminEvents.getStatus(),
       emailWorker: getEmailWorkerStatus(),

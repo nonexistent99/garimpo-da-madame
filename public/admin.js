@@ -271,11 +271,18 @@ function getFilteredBuyers() {
 function renderMetrics() {
   const buyers = state?.buyers || [];
   const approved = buyers.filter(order => order.status === 'approved');
+  const metrics = state?.metrics || {};
+  const totalReceived = Number.isFinite(Number(metrics.totalReceivedCents))
+    ? Number(metrics.totalReceivedCents)
+    : approved.reduce((sum, order) => sum + (Number(order.amount_cents) || 0), 0);
+  const approvedCount = Number.isFinite(Number(metrics.approvedCount)) ? Number(metrics.approvedCount) : approved.length;
+  const vipCount = Number.isFinite(Number(metrics.vipCount)) ? Number(metrics.vipCount) : approved.filter(order => order.plan_key === 'vip').length;
+  const clubeCount = Number.isFinite(Number(metrics.clubeCount)) ? Number(metrics.clubeCount) : approved.filter(order => order.plan_key === 'clube').length;
   const emailIssues = approved.filter(order => !order.email_status || order.email_status === 'failed');
-  $('#ordersRevenue').textContent = money(approved.reduce((sum, order) => sum + (Number(order.amount_cents) || 0), 0));
-  $('#ordersApproved').textContent = `${approved.length} compras aprovadas`;
-  $('#ordersVip').textContent = String(approved.filter(order => order.plan_key === 'vip').length);
-  $('#ordersClub').textContent = String(approved.filter(order => order.plan_key === 'clube').length);
+  $('#ordersRevenue').textContent = money(totalReceived);
+  $('#ordersApproved').textContent = `${approvedCount} compras aprovadas`;
+  $('#ordersVip').textContent = String(vipCount);
+  $('#ordersClub').textContent = String(clubeCount);
   $('#ordersEmailIssues').textContent = String(emailIssues.length);
   $('#ordersEmailIssues').nextElementSibling.textContent = emailIssues.length ? 'Exigem atencao' : 'Fila saudavel';
 }
