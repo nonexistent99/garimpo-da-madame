@@ -15,7 +15,7 @@ const security = require('../src/commerce/security');
 const nodemailer = require('nodemailer');
 const { runEmailWorker } = require('../src/commerce/emailService');
 const { processOffer } = require('../src/commerce/offerService');
-const { approveOrderFromProvider, buildOffersCsv } = require('../src/commerce/routes');
+const { approveOrderFromProvider, buildOffersCsv, buildLeadsCsv } = require('../src/commerce/routes');
 const lastlink = require('../src/commerce/lastlinkService');
 const app = require('../src/server');
 
@@ -209,6 +209,14 @@ test('webhook Lastlink do Clube aprova sem perder plano e agenda email', async t
   delete process.env.LASTLINK_CLUBE_CHECKOUT_URL;
   delete process.env.LASTLINK_CLUBE_WEBHOOK_SECRET;
   delete process.env.LASTLINK_STRICT_AMOUNT_VALIDATION;
+});
+
+test('exportação de leads protege planilha contra fórmulas e mascara documento', () => {
+  const csv = buildLeadsCsv([{ id: 'ord_1', name: '=Cliente', email: 'lead@example.com', phone: '11999999999', cpf_mask: '***.982.247-**', plan_key: 'vip', status: 'approved', amount_cents: 9700, currency: 'BRL', purchase_source: 'lastlink', marketing_opt_in: 1, approved_at: '2026-09-15T10:00:00.000Z', created_at: '2026-09-15T10:00:00.000Z' }]);
+  assert.match(csv, /Documento protegido/);
+  assert.match(csv, /"'=Cliente"/);
+  assert.match(csv, /\*\*\*\.982\.247-\*\*/);
+  assert.match(csv, /"97,00"/);
 });
 
 test('importa venda histórica sem telefone quando CPF e demais dados estão válidos', async t => {

@@ -101,6 +101,20 @@ function buildOffersCsv(offers) {
   return '\uFEFF' + [headers, ...rows].map(row => row.map(spreadsheetCell).join(';')).join('\r\n');
 }
 
+function buildLeadsCsv(leads) {
+  const headers = [
+    'Código do pedido', 'Nome', 'E-mail', 'WhatsApp', 'Documento protegido', 'Plano',
+    'Status', 'Valor (R$)', 'Moeda', 'Origem', 'Aceitou promoções', 'Compra aprovada em', 'Criado em',
+  ];
+  const rows = leads.map(lead => [
+    lead.id, lead.name, lead.email, lead.phone, lead.cpf_mask,
+    lead.plan_key === 'clube' ? 'Clube Sócio' : 'VIP Garimpo', lead.status,
+    (Number(lead.amount_cents || 0) / 100).toFixed(2).replace('.', ','), lead.currency || 'BRL',
+    lead.purchase_source || 'manual', Number(lead.marketing_opt_in) ? 'Sim' : 'Não', lead.approved_at, lead.created_at,
+  ]);
+  return '\uFEFF' + [headers, ...rows].map(row => row.map(spreadsheetCell).join(';')).join('\r\n');
+}
+
 async function approveOrderFromProvider(providerId) {
   const payment = require('./paymentService');
   const providerPayment = await payment.fetchPayment(providerId);
@@ -456,6 +470,21 @@ function registerCommerceRoutes(app) {
     res.send(buildOffersCsv(offers));
   });
 
+  app.get('/api/admin/leads/export.csv', security.requireAdmin, async (_req, res) => {
+    const leads = await db.getQuery(`SELECT o.id,o.amount_cents,o.currency,o.status,o.provider_status,o.access_group_key,
+      o.approved_at,o.created_at,c.name,c.email,c.phone,c.cpf_mask,c.marketing_opt_in,
+      CASE WHEN o.access_group_key='clube' OR o.provider_status='confirmed_clube' THEN 'clube' ELSE 'vip' END plan_key,
+      CASE WHEN imported_event.event_key IS NOT NULL THEN 'import' WHEN o.provider_status LIKE 'confirmed%' THEN 'lastlink' ELSE 'manual' END purchase_source
+      FROM orders o JOIN customers c ON c.id=o.customer_id
+      LEFT JOIN webhook_events imported_event ON imported_event.provider='lastlink' AND imported_event.event_key=('import:' || o.provider_payment_id)
+      ORDER BY o.created_at DESC`);
+    const date = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="leads-garimpo-${date}.csv"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(buildLeadsCsv(leads));
+  });
+
   app.post('/api/admin/import/lastlink-sales', security.requireAdmin, async (req, res) => {
     const sales = Array.isArray(req.body.sales) ? req.body.sales.slice(0, 500) : [];
     if (!sales.length) return res.status(422).json({ error: 'Envie ao menos uma venda para importar.' });
@@ -610,4 +639,4 @@ function registerCommerceRoutes(app) {
   app.post('/api/admin/offers/:id/publish', security.requireAdmin, async (req, res) => res.json({ sent: await publishOffer(req.params.id) }));
 }
 
-module.exports = { registerCommerceRoutes, approveOrderFromProvider, buildOffersCsv };
+module.exports = { registerCommerceRoutes, approveOrderFromProvider, buildOffersCsv, buildLeadsCsv };
