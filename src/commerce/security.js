@@ -22,6 +22,26 @@ function isCpfShapeValid(value) {
   return true;
 }
 
+function isCnpjShapeValid(value) {
+  const cnpj = normalizeCpf(value);
+  if (cnpj.length !== 14 || /^(\d)\1{13}$/.test(cnpj)) return false;
+  const calculateDigit = base => {
+    const weights = base.length === 12
+      ? [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+      : [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    const sum = base.split('').reduce((total, digit, index) => total + Number(digit) * weights[index], 0);
+    const remainder = sum % 11;
+    return remainder < 2 ? 0 : 11 - remainder;
+  };
+  return calculateDigit(cnpj.slice(0, 12)) === Number(cnpj[12])
+    && calculateDigit(cnpj.slice(0, 13)) === Number(cnpj[13]);
+}
+
+function isDocumentShapeValid(value) {
+  const document = normalizeCpf(value);
+  return document.length === 11 ? isCpfShapeValid(document) : isCnpjShapeValid(document);
+}
+
 function encryptCpf(cpf) {
   const key = secretKey();
   if (!key) throw new Error('APP_SECRET não configurado');
@@ -39,7 +59,9 @@ function hashCpf(cpf) {
 
 function maskCpf(cpf) {
   const digits = normalizeCpf(cpf);
-  return digits.length === 11 ? `***.${digits.slice(3, 6)}.${digits.slice(6, 9)}-**` : '***.***.***-**';
+  if (digits.length === 11) return `***.${digits.slice(3, 6)}.${digits.slice(6, 9)}-**`;
+  if (digits.length === 14) return `**.***.${digits.slice(5, 8)}/${digits.slice(8, 12)}-**`;
+  return 'Documento inválido';
 }
 
 function parseCookies(header = '') {
@@ -110,4 +132,4 @@ function randomId(prefix) { return `${prefix}_${crypto.randomBytes(12).toString(
 function randomToken() { return crypto.randomBytes(32).toString('base64url'); }
 function tokenHash(token) { return crypto.createHash('sha256').update(token).digest('hex'); }
 
-module.exports = { createSession, getSession, requireAdmin, createStaffSession, getStaffSession, requireStaff, safeEqual, normalizeCpf, encryptCpf, hashCpf, maskCpf, isCpfShapeValid, randomId, randomToken, tokenHash, sessions, staffSessions };
+module.exports = { createSession, getSession, requireAdmin, createStaffSession, getStaffSession, requireStaff, safeEqual, normalizeCpf, encryptCpf, hashCpf, maskCpf, isCpfShapeValid, isCnpjShapeValid, isDocumentShapeValid, randomId, randomToken, tokenHash, sessions, staffSessions };

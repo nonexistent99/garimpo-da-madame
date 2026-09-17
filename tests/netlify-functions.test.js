@@ -20,6 +20,13 @@ test('normaliza e valida compra Lastlink recebida pela Netlify', async () => {
   assert.equal(lastlink.validatePurchase(event), null);
   assert.equal(event.amountCents, 9700);
   assert.equal(event.buyer.email, 'cliente@example.com');
+  const companyEvent = lastlink.extractLastlink({
+    Id: 'evt-company', Event: 'Purchase_Order_Confirmed',
+    Data: { Buyer: { Name: 'Empresa Teste', Email: 'empresa@example.com', PhoneNumber: '11999999999', Document: '11.222.333/0001-81' }, Purchase: { PaymentId: 'pay-company', Price: { Value: 497 } } },
+  });
+  assert.equal(lastlink.validatePurchase(companyEvent), null);
+  assert.equal(companyEvent.buyer.cpf, '11222333000181');
+  assert.equal(lastlink.maskCpf(companyEvent.buyer.cpf), '**.***.333/0001-**');
 });
 
 test('protege CPF e dados pessoais no armazenamento', async () => {

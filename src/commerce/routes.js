@@ -305,8 +305,8 @@ function registerCommerceRoutes(app) {
         return res.status(422).json({ error: verified.reason });
       }
       const name = cleanText(event.buyer.name, 120), email = cleanText(event.buyer.email, 180).toLowerCase();
-      const cpf = security.normalizeCpf(event.buyer.document); const phone = String(event.buyer.phone || '').replace(/\D/g, '').slice(0, 15);
-      if (name.length < 3 || !validEmail(email) || !security.isCpfShapeValid(cpf) || phone.length < 10) return res.status(422).json({ error: 'Dados do comprador incompletos.' });
+      const document = security.normalizeCpf(event.buyer.document); const phone = String(event.buyer.phone || '').replace(/\D/g, '').slice(0, 15);
+      if (name.length < 3 || !validEmail(email) || !security.isDocumentShapeValid(document) || phone.length < 10) return res.status(422).json({ error: 'Dados do comprador incompletos.' });
       const [existing] = await db.getQuery('SELECT * FROM orders WHERE provider_payment_id=?', [event.paymentId]);
       if (existing) {
         const [existingCustomer] = await db.getQuery('SELECT id,name,email,phone FROM customers WHERE id=?', [existing.customer_id]);
@@ -318,7 +318,7 @@ function registerCommerceRoutes(app) {
       const now = new Date().toISOString(), customerId = security.randomId('cus'), orderId = security.randomId('ord');
       const customer = { id: customerId, name, email, phone };
       await db.runQuery('INSERT INTO customers (id,name,email,cpf_encrypted,cpf_hash,cpf_mask,phone,terms_accepted_at,marketing_opt_in,created_at) VALUES (?,?,?,?,?,?,?,?,0,?)',
-        [customerId, name, email, security.encryptCpf(cpf), security.hashCpf(cpf), security.maskCpf(cpf), phone, event.createdAt || now, now]);
+        [customerId, name, email, security.encryptCpf(document), security.hashCpf(document), security.maskCpf(document), phone, event.createdAt || now, now]);
       await db.runQuery("INSERT INTO orders (id,customer_id,access_group_key,amount_cents,currency,status,provider_payment_id,provider_status,created_at,updated_at) VALUES (?,?,?,?,'BRL','pending',?,?,?,?)",
         [orderId, customerId, verified.plan, event.amountCents, event.paymentId, `confirmed_${verified.plan}`, now, now]);
       const result = await grantAccess({
@@ -355,17 +355,18 @@ function registerCommerceRoutes(app) {
   app.get('/api/staff/session', security.requireStaff, (req, res) => res.json({ authenticated: true, csrf: req.staffSession.csrf }));
   app.post('/api/staff/logout', security.requireStaff, (req, res) => { security.staffSessions.delete(req.staffSession.token); res.setHeader('Set-Cookie', 'gm_staff=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly'); res.json({ ok: true }); });
   app.post('/api/staff/cpf-lookup', security.requireStaff, async (req, res) => {
-    const cpf = security.normalizeCpf(req.body.cpf);
-    if (!security.isCpfShapeValid(cpf)) return res.status(422).json({ error: 'Informe um CPF válido.' });
+    const document = security.normalizeCpf(req.body.document || req.body.cpf);
+    if (!security.isDocumentShapeValid(document)) return res.status(422).json({ error: 'Informe um CPF ou CNPJ válido.' });
     const rows = await db.getQuery(`SELECT c.name,o.status,o.provider_status,o.approved_at,o.redeem_expires_at,o.created_at
-      FROM customers c JOIN orders o ON o.customer_id=c.id WHERE c.cpf_hash=? ORDER BY o.created_at DESC LIMIT 1`, [security.hashCpf(cpf)]);
+      FROM customers c JOIN orders o ON o.customer_id=c.id WHERE c.cpf_hash=? ORDER BY o.created_at DESC LIMIT 1`, [security.hashCpf(document)]);
     const order = rows[0];
     if (!order) return res.json({ found: false });
     const purchasedAt = new Date(order.approved_at || order.created_at);
     const validUntil = new Date(purchasedAt); validUntil.setFullYear(validUntil.getFullYear() + 1);
     const active = order.status === 'approved' && validUntil > new Date();
     const plan = order.provider_status === 'confirmed_clube' ? 'Clube Sócio' : 'VIP Garimpo';
-    res.json({ found: true, customer: maskName(order.name), cpfLastFive: cpf.slice(-5), plan, status: active ? 'ativo' : 'inativo', purchasedAt: purchasedAt.toISOString(), validUntil: validUntil.toISOString(), invitePageExpiresAt: order.redeem_expires_at || null });
+    const documentType = document.length === 14 ? 'CNPJ' : 'CPF';
+    res.json({ found: true, customer: maskName(order.name), documentType, documentLastFive: document.slice(-5), cpfLastFive: document.slice(-5), plan, status: active ? 'ativo' : 'inativo', purchasedAt: purchasedAt.toISOString(), validUntil: validUntil.toISOString(), invitePageExpiresAt: order.redeem_expires_at || null });
   });
 
   app.post('/api/admin/login', (req, res) => {
@@ -495,13 +496,13 @@ function registerCommerceRoutes(app) {
       const paymentId = cleanText(sale.paymentId, 160);
       const name = cleanText(sale.name, 120);
       const email = cleanText(sale.email, 180).toLowerCase();
-      const cpf = security.normalizeCpf(sale.cpf);
+      const document = security.normalizeCpf(sale.document || sale.cpf);
       const phone = String(sale.phone || '').replace(/\D/g, '').slice(0, 15);
       const amountCents = Number(sale.amountCents);
       const plan = sale.plan === 'clube' ? 'clube' : 'vip';
       const purchasedAt = new Date(sale.purchasedAt || '');
 
-      if (!paymentId || name.length < 3 || !validEmail(email) || !security.isCpfShapeValid(cpf)
+      if (!paymentId || name.length < 3 || !validEmail(email) || !security.isDocumentShapeValid(document)
         || (phone && phone.length < 10) || !Number.isInteger(amountCents) || amountCents < 1
         || Number.isNaN(purchasedAt.getTime())) {
         result.rejected.push({ row: index + 2, reason: 'Dados obrigatórios inválidos.' });
@@ -516,13 +517,13 @@ function registerCommerceRoutes(app) {
 
       const approvedAt = purchasedAt.toISOString();
       const inviteExpiresAt = new Date(purchasedAt.getTime() + 24 * 60 * 60 * 1000).toISOString();
-      const cpfHash = security.hashCpf(cpf);
+      const cpfHash = security.hashCpf(document);
       let [customer] = await db.getQuery('SELECT id FROM customers WHERE cpf_hash=? ORDER BY created_at DESC LIMIT 1', [cpfHash]);
       let createdCustomer = false;
       if (!customer) {
         customer = { id: security.randomId('cus') };
         await db.runQuery('INSERT INTO customers (id,name,email,cpf_encrypted,cpf_hash,cpf_mask,phone,terms_accepted_at,marketing_opt_in,created_at) VALUES (?,?,?,?,?,?,?,?,0,?)',
-          [customer.id, name, email, security.encryptCpf(cpf), cpfHash, security.maskCpf(cpf), phone, approvedAt, approvedAt]);
+          [customer.id, name, email, security.encryptCpf(document), cpfHash, security.maskCpf(document), phone, approvedAt, approvedAt]);
         createdCustomer = true;
       }
 

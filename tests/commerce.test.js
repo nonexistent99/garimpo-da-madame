@@ -8,6 +8,8 @@ process.env.NODE_ENV = 'test';
 process.env.DATABASE_PATH = path.join(os.tmpdir(), `garimpo-test-${process.pid}.sqlite`);
 process.env.APP_SECRET = 'test-secret-with-more-than-thirty-two-characters';
 process.env.ADMIN_PASSWORD = 'Strong-test-password-123!';
+process.env.STAFF_PORTAL_USERNAME = 'equipe-teste';
+process.env.STAFF_PORTAL_PASSWORD = 'Strong-staff-password-123!';
 
 const db = require('../src/database/database');
 const payment = require('../src/commerce/paymentService');
@@ -63,6 +65,38 @@ test('aceita valor promocional no plano autenticado e bloqueia checkout de outro
   delete process.env.LASTLINK_STRICT_CHECKOUT_VALIDATION;
   assert.equal(lastlink.verifyPurchase({ ...event, offerUrl: 'https://lastlink.com/p/COUTRO999/checkout-payment/' }, { price_cents: 9700 }, 'vip').ok, true);
   delete process.env.LASTLINK_VIP_CHECKOUT_URL; delete process.env.LASTLINK_STRICT_AMOUNT_VALIDATION;
+});
+
+test('valida CNPJ e identifica documentos aceitos na consulta', () => {
+  assert.equal(security.isCnpjShapeValid('11.222.333/0001-81'), true);
+  assert.equal(security.isCnpjShapeValid('11.222.333/0001-82'), false);
+  assert.equal(security.isCnpjShapeValid('11.111.111/1111-11'), false);
+  assert.equal(security.isDocumentShapeValid('529.982.247-25'), true);
+  assert.equal(security.isDocumentShapeValid('11.222.333/0001-81'), true);
+  assert.equal(security.maskCpf('11.222.333/0001-81'), '**.***.333/0001-**');
+});
+
+test('atendente consulta cadastro pelo CNPJ', async t => {
+  await db.ready;
+  const now = new Date().toISOString();
+  const customerId = security.randomId('cus');
+  const orderId = security.randomId('ord');
+  const cnpj = '11222333000181';
+  await db.runQuery('INSERT INTO customers(id,name,email,cpf_encrypted,cpf_hash,cpf_mask,phone,terms_accepted_at,marketing_opt_in,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)', [customerId, 'Empresa Teste', 'empresa@example.com', security.encryptCpf(cnpj), security.hashCpf(cnpj), security.maskCpf(cnpj), '11999999999', now, 0, now]);
+  await db.runQuery("INSERT INTO orders(id,customer_id,access_group_key,amount_cents,status,provider_status,approved_at,created_at,updated_at) VALUES(?,?,?,49700,'approved','confirmed_clube',?,?,?)", [orderId, customerId, 'clube', now, now, now]);
+  const server = app.listen(0); t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = await fetch(`${base}/api/staff/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: process.env.STAFF_PORTAL_USERNAME, password: process.env.STAFF_PORTAL_PASSWORD }) });
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const { csrf } = await login.json();
+  const lookup = await fetch(`${base}/api/staff/cpf-lookup`, { method: 'POST', headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': csrf }, body: JSON.stringify({ document: cnpj }) });
+  assert.equal(lookup.status, 200);
+  const result = await lookup.json();
+  assert.equal(result.found, true);
+  assert.equal(result.documentType, 'CNPJ');
+  assert.equal(result.documentLastFive, '00181');
+  assert.equal(result.plan, 'Clube Sócio');
 });
 
 test('protege APIs legadas, mascara CPF e exige CSRF', async t => {

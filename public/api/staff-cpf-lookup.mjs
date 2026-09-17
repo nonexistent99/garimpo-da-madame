@@ -1,6 +1,6 @@
 import { decryptJson } from './_shared/crypto.mjs';
 import { readJson } from './_shared/blob.mjs';
-import { cpfKey, maskName, normalizeCpf, paymentKey, validCpf } from './_shared/lastlink.mjs';
+import { cpfKey, maskName, normalizeCpf, paymentKey, validDocument } from './_shared/lastlink.mjs';
 import { relay, upstream } from './_shared/upstream.mjs';
 
 const requestBody = async request => {
@@ -26,11 +26,11 @@ export default async function handler(request, response) {
   if (sourceResult.found) return send(response, sourceResult);
   let body;
   try { body = JSON.parse(rawBody); } catch { return send(response, { error: 'JSON invalido.' }, 400); }
-  const cpf = normalizeCpf(body.cpf);
-  if (!validCpf(cpf)) return send(response, { error: 'Informe um CPF valido.' }, 422);
+  const document = normalizeCpf(body.document || body.cpf);
+  if (!validDocument(document)) return send(response, { error: 'Informe um CPF ou CNPJ valido.' }, 422);
   const dataKey = process.env.LASTLINK_DATA_KEY;
   if (!dataKey) return send(response, { found: false });
-  const index = await readJson(cpfKey(cpf, dataKey));
+  const index = await readJson(cpfKey(document, dataKey));
   if (!index?.paymentId) return send(response, { found: false });
   const order = await readJson(paymentKey(index.paymentId));
   if (!order) return send(response, { found: false });
@@ -41,7 +41,9 @@ export default async function handler(request, response) {
   return send(response, {
     found: true,
     customer: maskName(customer.name),
-    cpfLastFive: cpf.slice(-5),
+    documentType: document.length === 14 ? 'CNPJ' : 'CPF',
+    documentLastFive: document.slice(-5),
+    cpfLastFive: document.slice(-5),
     plan: order.plan === 'clube' ? 'Clube Socio' : 'VIP Garimpo',
     status: order.status === 'approved' && validUntil > new Date() ? 'ativo' : 'inativo',
     purchasedAt: purchasedAt.toISOString(),

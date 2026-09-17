@@ -10,7 +10,7 @@ export function cleanText(value, maxLength) {
 }
 
 export function normalizeCpf(value) {
-  return String(value || '').replace(/\D/g, '').slice(0, 11);
+  return String(value || '').replace(/\D/g, '').slice(0, 14);
 }
 
 export function validCpf(value) {
@@ -25,8 +25,29 @@ export function validCpf(value) {
   return digit(9) === Number(cpf[9]) && digit(10) === Number(cpf[10]);
 }
 
+export function validCnpj(value) {
+  const cnpj = normalizeCpf(value);
+  if (cnpj.length !== 14 || /^(\d)\1{13}$/.test(cnpj)) return false;
+  const digit = base => {
+    const weights = base.length === 12
+      ? [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+      : [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    const sum = base.split('').reduce((total, number, index) => total + Number(number) * weights[index], 0);
+    const remainder = sum % 11;
+    return remainder < 2 ? 0 : 11 - remainder;
+  };
+  return digit(cnpj.slice(0, 12)) === Number(cnpj[12]) && digit(cnpj.slice(0, 13)) === Number(cnpj[13]);
+}
+
+export function validDocument(value) {
+  const document = normalizeCpf(value);
+  return document.length === 11 ? validCpf(document) : validCnpj(document);
+}
+
 export function maskCpf(cpf) {
-  return `***.${cpf.slice(3, 6)}.${cpf.slice(6, 9)}-**`;
+  const document = normalizeCpf(cpf);
+  if (document.length === 14) return `**.***.${document.slice(5, 8)}/${document.slice(8, 12)}-**`;
+  return `***.${document.slice(3, 6)}.${document.slice(6, 9)}-**`;
 }
 
 export function cpfKey(cpf, dataKey) {
@@ -73,7 +94,7 @@ export function validatePurchase(event) {
   if (!Number.isInteger(event.amountCents) || event.amountCents <= 0) return 'amount_missing';
   if (event.buyer.name.length < 3) return 'buyer_name_missing';
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(event.buyer.email)) return 'buyer_email_invalid';
-  if (!validCpf(event.buyer.cpf)) return 'buyer_cpf_invalid';
+  if (!validDocument(event.buyer.cpf)) return 'buyer_document_invalid';
   if (event.buyer.phone.length < 10) return 'buyer_phone_invalid';
   return null;
 }
