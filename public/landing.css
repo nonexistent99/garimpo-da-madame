@@ -240,32 +240,8 @@ h2 { font-size: clamp(38px, 4.8vw, 68px); line-height: .98; }
 footer { padding: 34px clamp(20px, 7vw, 110px); display: flex; align-items: center; justify-content: space-between; gap: 26px; background: #050506; color: #aaa5a8; border-top: 1px solid #333; }
 .footer-brand { color: #fff; }
 .footer-brand .brand-avatar { width: 48px; height: 48px; }
-.footer-links { display: flex; flex-wrap: wrap; gap: 12px; }
-.footer-links a {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
-  padding: 10px 16px;
-  color: #fff;
-  background: #050506;
-  border: 2px solid #fff;
-  box-shadow: 4px 4px 0 var(--magenta);
-  font-weight: 900;
-  letter-spacing: .04em;
-  text-decoration: none;
-  text-transform: uppercase;
-  transition: transform .18s var(--ease), box-shadow .18s var(--ease), background-color .18s var(--ease), color .18s var(--ease);
-}
-.footer-links a:hover,
-.footer-links a:focus-visible {
-  color: var(--ink);
-  background: var(--yellow);
-  border-color: var(--yellow);
-  box-shadow: 6px 6px 0 var(--magenta);
-  transform: translate(-2px, -2px);
-}
-.footer-links a:active { box-shadow: 2px 2px 0 var(--magenta); transform: translate(2px, 2px); }
+.footer-links { display: flex; gap: 24px; }
+.footer-links a { color: #fff; font-weight: 700; text-underline-offset: 4px; }
 
 dialog { max-width: 620px; padding: 36px; border: 3px solid var(--ink); border-radius: 0; box-shadow: 12px 12px 0 var(--magenta); line-height: 1.6; }
 dialog::backdrop { background: #0b0b0ddd; }
@@ -342,8 +318,6 @@ dialog h2 { font-size: 32px; }
   .form-head { margin: -23px -23px 26px; padding: 16px 23px; }
   .split-field { grid-template-columns: 1fr; gap: 0; }
   footer { align-items: flex-start; flex-direction: column; padding-bottom: 40px; }
-  .footer-links { width: 100%; }
-  .footer-links a { flex: 1 1 140px; }
   .mobile-cta { position: fixed; z-index: 50; left: 8px; right: 8px; bottom: 8px; min-height: 60px; padding: 9px 17px; display: flex; align-items: center; justify-content: space-between; background: var(--magenta); border: 2px solid var(--ink); box-shadow: 4px 4px 0 var(--yellow); color: #fff; text-decoration: none; }
   .mobile-cta span { font: 18px 'Archivo Black', sans-serif; }
   .mobile-cta strong { font-size: 12px; text-align: right; }
