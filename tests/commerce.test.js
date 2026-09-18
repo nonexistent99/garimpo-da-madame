@@ -380,3 +380,56 @@ test('checkout Sunize cria PIX e webhook aprova no banco compartilhado', async t
   const [customer] = await db.getQuery('SELECT cpf_mask FROM customers c JOIN orders o ON o.customer_id=c.id WHERE o.id=?', [created.orderId]);
   assert.equal(customer.cpf_mask, '***.982.247-**');
 });
+
+test('separa vendas e receita dos paineis principal e Kwai', async t => {
+  await db.ready;
+  const now = new Date().toISOString();
+  const mainCustomerId = security.randomId('cus');
+  const kwaiCustomerId = security.randomId('cus');
+  const mainOrderId = security.randomId('ord');
+  const kwaiOrderId = security.randomId('ord');
+  await db.runQuery(
+    'INSERT INTO customers(id,name,email,cpf_encrypted,cpf_hash,cpf_mask,phone,terms_accepted_at,marketing_opt_in,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+    [mainCustomerId, 'Cliente Principal Escopo', `main-${mainCustomerId}@example.com`, 'protected', security.randomId('hash'), '***.000.001-**', '11911111111', now, 0, now],
+  );
+  await db.runQuery(
+    'INSERT INTO customers(id,name,email,cpf_encrypted,cpf_hash,cpf_mask,phone,terms_accepted_at,marketing_opt_in,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+    [kwaiCustomerId, 'Cliente Kwai Escopo', `kwai-${kwaiCustomerId}@example.com`, 'protected', security.randomId('hash'), '***.000.002-**', '11922222222', now, 0, now],
+  );
+  await db.runQuery(
+    "INSERT INTO orders(id,customer_id,access_group_key,amount_cents,currency,status,provider_status,approved_at,created_at,updated_at) VALUES(?,?, 'vip',12345,'BRL','approved','confirmed_vip',?,?,?)",
+    [mainOrderId, mainCustomerId, now, now, now],
+  );
+  await db.runQuery(
+    "INSERT INTO orders(id,customer_id,access_group_key,amount_cents,currency,status,provider_status,approved_at,created_at,updated_at) VALUES(?,?, 'vip',54321,'BRL','approved','sunize_AUTHORIZED',?,?,?)",
+    [kwaiOrderId, kwaiCustomerId, now, now, now],
+  );
+
+  const server = app.listen(0); t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = await fetch(`${base}/api/admin/login`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: process.env.ADMIN_PASSWORD }),
+  });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const main = await (await fetch(`${base}/api/admin/overview?source=main`, { headers: { cookie } })).json();
+  const kwai = await (await fetch(`${base}/api/admin/overview?source=sunize`, { headers: { cookie } })).json();
+  const [[mainExpected], [kwaiExpected]] = await Promise.all([
+    db.getQuery("SELECT COALESCE(SUM(amount_cents),0) total FROM orders WHERE status='approved' AND COALESCE(provider_status,'') NOT LIKE 'sunize_%'"),
+    db.getQuery("SELECT COALESCE(SUM(amount_cents),0) total FROM orders WHERE status='approved' AND provider_status LIKE 'sunize_%'"),
+  ]);
+
+  assert.equal(main.dashboardSource, 'main');
+  assert.equal(kwai.dashboardSource, 'sunize');
+  assert.equal(main.buyers.some(order => order.id === mainOrderId), true);
+  assert.equal(main.buyers.some(order => order.id === kwaiOrderId), false);
+  assert.equal(kwai.buyers.some(order => order.id === kwaiOrderId), true);
+  assert.equal(kwai.buyers.some(order => order.id === mainOrderId), false);
+  assert.equal(main.metrics.totalReceivedCents, Number(mainExpected.total));
+  assert.equal(kwai.metrics.totalReceivedCents, Number(kwaiExpected.total));
+
+  const exportResponse = await fetch(`${base}/api/admin/leads/export.csv?source=sunize`, { headers: { cookie } });
+  const exportCsv = await exportResponse.text();
+  assert.equal(exportResponse.headers.get('content-disposition').includes('leads-kwai-'), true);
+  assert.equal(exportCsv.includes(kwaiOrderId), true);
+  assert.equal(exportCsv.includes(mainOrderId), false);
+});

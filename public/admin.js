@@ -15,6 +15,33 @@ let orderSearch = '';
 let orderStatus = 'all';
 let settingsDirty = false;
 let browserAlerts = false;
+const dashboardSource = document.body.dataset.dashboardSource
+  || (location.hostname.includes('kwai') ? 'sunize' : 'main');
+const isKwaiDashboard = dashboardSource === 'sunize';
+
+function scopedAdminUrl(path) {
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}source=${encodeURIComponent(dashboardSource)}`;
+}
+
+function applyDashboardIdentity() {
+  const exportLink = document.querySelector('a[href="/api/admin/leads/export.csv"]');
+  if (exportLink) exportLink.href = scopedAdminUrl('/api/admin/leads/export.csv');
+  if (!isKwaiDashboard) return;
+  document.title = 'Painel Kwai — Garimpo da Madame';
+  const loginTitle = document.querySelector('#loginView h1');
+  const appTitle = document.querySelector('#appView .app-title h1');
+  const appKicker = document.querySelector('#appView .app-title .kicker');
+  const ordersKicker = document.querySelector('#orders .section-title .kicker');
+  const ordersCopy = document.querySelector('#orders .section-copy');
+  const revenueLabel = document.querySelector('#ordersRevenue')?.previousElementSibling;
+  if (loginTitle) loginTitle.textContent = 'Painel Kwai';
+  if (appTitle) appTitle.textContent = 'Central Kwai';
+  if (appKicker) appKicker.textContent = 'GARIMPO DA MADAME · SUNIZE';
+  if (ordersKicker) ordersKicker.textContent = 'VENDAS KWAI & RECEITA';
+  if (ordersCopy) ordersCopy.textContent = 'Somente pedidos originados na página Kwai e processados pela Sunize.';
+  if (revenueLabel) revenueLabel.textContent = 'Total recebido no Kwai';
+}
 
 const money = cents => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format((Number(cents) || 0) / 100);
 const dateTime = value => (value ? new Date(value).toLocaleString('pt-BR') : 'Nao informado');
@@ -49,6 +76,7 @@ async function api(url, options = {}) {
 }
 
 async function boot() {
+  applyDashboardIdentity();
   try {
     const session = await api('/api/admin/session');
     csrf = session.csrf;
@@ -125,7 +153,7 @@ async function refresh({ forceSettings = false, silent = false } = {}) {
   refreshPromise = (async () => {
     try {
       const previousBuyers = state?.buyers || null;
-      state = normalizeOverview(await api('/api/admin/overview'));
+      state = normalizeOverview(await api(scopedAdminUrl('/api/admin/overview')));
       notifyNewApprovedOrders(previousBuyers, state.buyers);
       fillSettings({ force: forceSettings });
       renderMetrics();
@@ -544,7 +572,7 @@ function connectRealtime() {
     return;
   }
   realtimeSource?.close();
-  realtimeSource = new EventSource('/api/admin/events');
+  realtimeSource = new EventSource(scopedAdminUrl('/api/admin/events'));
   realtimeSource.onopen = () => {
     realtimeConnected = true;
     realtimeFailures = 0;

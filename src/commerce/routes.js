@@ -36,6 +36,37 @@ function httpError(status, message) {
   return Object.assign(new Error(message), { status });
 }
 
+function adminDashboardScope(req) {
+  const requested = String(req.query?.source || '').trim().toLowerCase();
+  if (requested === 'sunize') {
+    return {
+      key: 'sunize',
+      orderCondition: "o.provider_status LIKE 'sunize_%'",
+      eventCondition: "provider='sunize'",
+      exportName: 'leads-kwai',
+    };
+  }
+  if (requested === 'main') {
+    return {
+      key: 'main',
+      orderCondition: "COALESCE(o.provider_status,'') NOT LIKE 'sunize_%'",
+      eventCondition: "provider='lastlink'",
+      exportName: 'leads-garimpo',
+    };
+  }
+  return {
+    key: 'all',
+    orderCondition: '1=1',
+    eventCondition: "provider IN ('lastlink','sunize')",
+    exportName: 'leads-garimpo',
+  };
+}
+
+function adminEventMatchesScope(event, scope) {
+  if (scope.key === 'all' || event.type === 'connected') return true;
+  return scope.key === 'sunize' ? event.source === 'sunize' : event.source !== 'sunize';
+}
+
 function summarizeWebhookEvent(row) {
   let result = {};
   try { result = JSON.parse(row.result || '{}'); } catch {}
@@ -509,6 +540,7 @@ function registerCommerceRoutes(app) {
   app.post('/api/admin/logout', security.requireAdmin, (req, res) => { security.sessions.delete(req.adminSession.token); res.setHeader('Set-Cookie', 'gm_admin=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly'); res.json({ ok: true }); });
 
   app.get('/api/admin/events', security.requireAdmin, (req, res) => {
+    const scope = adminDashboardScope(req);
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -516,7 +548,9 @@ function registerCommerceRoutes(app) {
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
 
-    const send = event => res.write(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`);
+    const send = event => {
+      if (adminEventMatchesScope(event, scope)) res.write(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`);
+    };
     const unsubscribe = adminEvents.subscribe(send);
     send({ id: `connected-${Date.now()}`, type: 'connected', at: new Date().toISOString() });
     const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 20_000);
@@ -527,7 +561,8 @@ function registerCommerceRoutes(app) {
     });
   });
 
-  app.get('/api/admin/overview', security.requireAdmin, async (_req, res) => {
+  app.get('/api/admin/overview', security.requireAdmin, async (req, res) => {
+    const scope = adminDashboardScope(req);
     const [[settings], buyers, offers, emailJobs, webhookEvents, [metrics]] = await Promise.all([
       db.getQuery('SELECT * FROM commerce_settings WHERE id=1'),
       db.getQuery(`SELECT o.id,o.amount_cents,o.currency,o.status,o.provider_status,o.access_group_key,o.approved_at,o.redeem_expires_at,o.created_at,o.updated_at,
@@ -539,15 +574,16 @@ function registerCommerceRoutes(app) {
         FROM orders o JOIN customers c ON c.id=o.customer_id
         LEFT JOIN email_jobs e ON e.order_id=o.id
         LEFT JOIN webhook_events imported_event ON imported_event.provider='lastlink' AND imported_event.event_key=('import:' || o.provider_payment_id)
+        WHERE ${scope.orderCondition}
         ORDER BY o.created_at DESC LIMIT 500`),
       db.getQuery('SELECT * FROM store_offers ORDER BY created_at DESC LIMIT 100'), db.getQuery('SELECT status,COUNT(*) count FROM email_jobs GROUP BY status'),
-      db.getQuery("SELECT event_key,received_at,processed_at,result FROM webhook_events WHERE provider IN ('lastlink','sunize') ORDER BY received_at DESC LIMIT 25"),
+      db.getQuery(`SELECT event_key,received_at,processed_at,result FROM webhook_events WHERE ${scope.eventCondition} ORDER BY received_at DESC LIMIT 25`),
       db.getQuery(`SELECT
         COALESCE(SUM(CASE WHEN status='approved' THEN amount_cents ELSE 0 END), 0) AS total_received_cents,
         COALESCE(SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END), 0) AS approved_count,
         COALESCE(SUM(CASE WHEN status='approved' AND (access_group_key='clube' OR provider_status='confirmed_clube') THEN 1 ELSE 0 END), 0) AS clube_count,
         COALESCE(SUM(CASE WHEN status='approved' AND NOT (access_group_key='clube' OR provider_status='confirmed_clube') THEN 1 ELSE 0 END), 0) AS vip_count
-        FROM orders`),
+        FROM orders o WHERE ${scope.orderCondition}`),
     ]);
     const vipCheckout = !!(process.env.LASTLINK_VIP_CHECKOUT_URL || process.env.LASTLINK_CHECKOUT_URL);
     const clubeCheckout = !!process.env.LASTLINK_CLUBE_CHECKOUT_URL;
@@ -556,7 +592,7 @@ function registerCommerceRoutes(app) {
     const vipProduct = !!(process.env.LASTLINK_VIP_OFFER_ID || process.env.LASTLINK_VIP_PRODUCT_ID || vipCheckout);
     const clubeProduct = !!(process.env.LASTLINK_CLUBE_OFFER_ID || process.env.LASTLINK_CLUBE_PRODUCT_ID || clubeCheckout);
     const summarizedEvents = webhookEvents.map(summarizeWebhookEvent);
-    res.json({ settings, buyers, offers, emailJobs, metrics: {
+    res.json({ dashboardSource: scope.key, settings, buyers, offers, emailJobs, metrics: {
       totalReceivedCents: Number(metrics?.total_received_cents || 0),
       approvedCount: Number(metrics?.approved_count || 0),
       vipCount: Number(metrics?.vip_count || 0),
@@ -596,17 +632,19 @@ function registerCommerceRoutes(app) {
     res.send(buildOffersCsv(offers));
   });
 
-  app.get('/api/admin/leads/export.csv', security.requireAdmin, async (_req, res) => {
+  app.get('/api/admin/leads/export.csv', security.requireAdmin, async (req, res) => {
+    const scope = adminDashboardScope(req);
     const leads = await db.getQuery(`SELECT o.id,o.amount_cents,o.currency,o.status,o.provider_status,o.access_group_key,
       o.approved_at,o.created_at,c.name,c.email,c.phone,c.cpf_mask,c.marketing_opt_in,
       CASE WHEN o.access_group_key='clube' OR o.provider_status='confirmed_clube' THEN 'clube' ELSE 'vip' END plan_key,
       CASE WHEN imported_event.event_key IS NOT NULL THEN 'import' WHEN o.provider_status LIKE 'sunize_%' THEN 'sunize' WHEN o.provider_status LIKE 'confirmed%' THEN 'lastlink' ELSE 'manual' END purchase_source
       FROM orders o JOIN customers c ON c.id=o.customer_id
       LEFT JOIN webhook_events imported_event ON imported_event.provider='lastlink' AND imported_event.event_key=('import:' || o.provider_payment_id)
+      WHERE ${scope.orderCondition}
       ORDER BY o.created_at DESC`);
     const date = new Date().toISOString().slice(0, 10);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="leads-garimpo-${date}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${scope.exportName}-${date}.csv"`);
     res.setHeader('Cache-Control', 'no-store');
     res.send(buildLeadsCsv(leads));
   });

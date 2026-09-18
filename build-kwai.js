@@ -6,9 +6,15 @@ const output = path.join(root, 'kwai-dist');
 fs.rmSync(output, { recursive: true, force: true });
 fs.cpSync(path.join(root, 'public'), output, { recursive: true });
 
-for (const file of ['index.html', 'landing.js', 'kwai.css']) {
+for (const file of ['index.html', 'landing.js', 'analytics.js', 'kwai.css']) {
   fs.copyFileSync(path.join(root, 'kwai', file), path.join(output, file));
 }
+
+const kwaiAdminPath = path.join(output, 'admin.html');
+fs.writeFileSync(
+  kwaiAdminPath,
+  fs.readFileSync(kwaiAdminPath, 'utf8').replace('data-dashboard-source="main"', 'data-dashboard-source="sunize"'),
+);
 
 for (const file of ['depoimento-cliente-01.mp4', 'depoimento-cliente-02.mp4', 'depoimento-cliente-03.mp4']) {
   fs.rmSync(path.join(output, 'assets', 'garimpo', file), { force: true });
