@@ -7,6 +7,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "test": "node --test --test-concurrency=1 tests/*.test.js",
+    "build:kwai": "node build-kwai.js",
     "publish": "node publish.js"
   },
   "dependencies": {

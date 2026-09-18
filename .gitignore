@@ -17,3 +17,4 @@ test-github-temp.js
 .vercel/
 .railway-stage-*/
 .env.local
+kwai-dist/

@@ -1,0 +1,10 @@
+.pix-result { margin-top: 24px; padding-top: 24px; border-top: 3px solid var(--ink); text-align: center; }
+.pix-result[hidden] { display: none; }
+.pix-result h3 { margin: 4px 0 14px; font: 28px/1.05 'Archivo Black', sans-serif; }
+.pix-result img { width: min(280px, 100%); aspect-ratio: 1; margin: 0 auto 10px; border: 3px solid var(--ink); background: #fff; }
+.pix-result label { display: block; margin: 16px 0 7px; text-align: left; font-weight: 800; }
+.pix-result textarea { width: 100%; resize: none; border: 2px solid var(--ink); padding: 12px; background: #fff; color: var(--ink); font: 13px/1.35 monospace; }
+.pix-amount { margin: 4px 0; font: 28px/1 'Archivo Black', sans-serif; color: var(--magenta); }
+.pix-status { margin: 14px 0 0; font-weight: 800; }
+.pix-status.approved { color: #147a00; }
+.checkout-card.is-paying > :not(.form-head):not(.pix-result) { display: none; }

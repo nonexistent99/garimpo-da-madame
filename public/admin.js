@@ -155,7 +155,7 @@ function normalizeOverview(overview) {
         ...order,
         plan_key: order.plan_key || (providerStatus.includes('clube') ? 'clube' : 'vip'),
         has_redeem: order.has_redeem ?? Boolean(order.redeem_expires_at),
-        purchase_source: order.purchase_source || (historicalImport ? 'import' : providerStatus.includes('confirmed') ? 'lastlink' : 'manual'),
+        purchase_source: order.purchase_source || (historicalImport ? 'import' : providerStatus.startsWith('sunize_') ? 'sunize' : providerStatus.includes('confirmed') ? 'lastlink' : 'manual'),
       };
     }),
   };
@@ -408,6 +408,7 @@ function sourceLabel(source) {
   return {
     import: 'Importacao',
     lastlink: 'Lastlink',
+    sunize: 'Sunize',
     manual: 'Manual',
   }[source] || 'Origem';
 }
@@ -518,6 +519,8 @@ function renderSystems() {
     lastlinkCheckout: 'Checkouts VIP e Clube',
     lastlinkWebhook: 'Webhooks VIP e Clube',
     lastlinkProduct: 'Produtos Lastlink',
+    sunizeCheckout: 'Checkout PIX Sunize',
+    sunizeWebhook: 'Webhook Sunize',
     smtp: 'Email transacional',
     aiResearch: 'Pesquisa com IA',
   };

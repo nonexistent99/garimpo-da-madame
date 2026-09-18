@@ -19,6 +19,7 @@ const { runEmailWorker } = require('../src/commerce/emailService');
 const { processOffer } = require('../src/commerce/offerService');
 const { approveOrderFromProvider, buildOffersCsv, buildLeadsCsv } = require('../src/commerce/routes');
 const lastlink = require('../src/commerce/lastlinkService');
+const sunize = require('../src/commerce/sunizeService');
 const app = require('../src/server');
 
 test('valida corretamente os dois dígitos do CPF', () => {
@@ -338,4 +339,44 @@ test('fila de email agenda retry sem afetar pedido', async () => {
   const original=nodemailer.createTransport;nodemailer.createTransport=()=>({sendMail:async()=>{throw new Error('smtp offline')}});
   await runEmailWorker();nodemailer.createTransport=original;
   const [job]=await db.getQuery('SELECT status,attempts,last_error FROM email_jobs WHERE id=?',[id]);assert.equal(job.status,'retry');assert.equal(job.attempts,1);assert.match(job.last_error,/smtp offline/);
+});
+
+test('checkout Sunize cria PIX e webhook aprova no banco compartilhado', async t => {
+  await db.ready;
+  process.env.SUNIZE_API_KEY = 'sunize-key-test';
+  process.env.SUNIZE_API_SECRET = 'sunize-secret-test';
+  await db.runQuery("UPDATE commerce_settings SET sales_status='active' WHERE id=1");
+  const originalCreateTransaction = sunize.createTransaction;
+  sunize.createTransaction = async ({ orderId, plan, tracking }) => {
+    assert.equal(plan, 'vip');
+    assert.equal(tracking.utm_source, 'kwai');
+    return { id: `sunize-${orderId}`, status: 'PENDING', pixCode: '00020101021226850014br.gov.bcb.pix', amountCents: 9700 };
+  };
+  t.after(() => {
+    sunize.createTransaction = originalCreateTransaction;
+    delete process.env.SUNIZE_API_KEY;
+    delete process.env.SUNIZE_API_SECRET;
+  });
+
+  const server = app.listen(0); t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const checkout = await fetch(`${base}/api/public/sunize/orders`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ plan: 'vip', name: 'Cliente Kwai', email: 'kwai@example.com', phone: '(11) 99999-9999', document: '529.982.247-25', terms: true, marketing: true, utm_source: 'kwai' }),
+  });
+  assert.equal(checkout.status, 201);
+  const created = await checkout.json();
+  assert.match(created.pixQrBase64, /^data:image\/png;base64,/);
+  assert.equal(created.amountCents, 9700);
+
+  const webhook = await fetch(`${base}/api/webhooks/sunize`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-api-secret': process.env.SUNIZE_API_SECRET },
+    body: JSON.stringify({ id: `sunize-${created.orderId}`, external_id: created.orderId, status: 'AUTHORIZED', amount: 97 }),
+  });
+  assert.equal(webhook.status, 200);
+  const order = await (await fetch(`${base}/api/public/orders/${created.orderId}`)).json();
+  assert.equal(order.status, 'approved');
+  assert.equal(order.provider_status, 'sunize_AUTHORIZED');
+  const [customer] = await db.getQuery('SELECT cpf_mask FROM customers c JOIN orders o ON o.customer_id=c.id WHERE o.id=?', [created.orderId]);
+  assert.equal(customer.cpf_mask, '***.982.247-**');
 });

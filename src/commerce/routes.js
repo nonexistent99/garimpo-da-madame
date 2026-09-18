@@ -4,6 +4,8 @@ const multer = require('multer');
 const db = require('../database/database');
 const security = require('./security');
 const lastlink = require('./lastlinkService');
+const sunize = require('./sunizeService');
+const QRCode = require('qrcode');
 const { smtpConfigured, getEmailWorkerStatus } = require('./emailService');
 const adminEvents = require('./adminEvents');
 const { processOffer, publishOffer, analyzeRealPhoto } = require('./offerService');
@@ -20,6 +22,7 @@ const upload = multer({
 });
 const loginAttempts = new Map();
 const staffLoginAttempts = new Map();
+const sunizeCheckoutAttempts = new Map();
 
 function cleanText(value, max = 200) { return String(value || '').trim().slice(0, max); }
 function validEmail(value) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value); }
@@ -146,7 +149,7 @@ async function approveOrderFromProvider(providerId) {
   return { ok: true, orderId: order.id, accessUrl };
 }
 
-async function grantAccess(order, customer) {
+async function grantAccess(order, customer, source = 'lastlink') {
   if (order.status === 'approved') return { ok: true, replay: true, orderId: order.id };
   const rawToken = security.randomToken();
   const approvedAt = new Date();
@@ -160,8 +163,8 @@ async function grantAccess(order, customer) {
   const body = renderTemplate(settings.email_body, { nome: customer.name, link_acesso: accessUrl, suporte: settings.support_phone || 'não configurado' });
   await db.runQuery('INSERT OR IGNORE INTO email_jobs (id,order_id,recipient,subject,body,status,attempts,next_attempt_at,created_at) VALUES (?,?,?,?,?,\'pending\',0,?,?)',
     [security.randomId('mail'), order.id, customer.email, subject, body, approvedAt.toISOString(), approvedAt.toISOString()]);
-  adminEvents.publish('email.queued', { orderId: order.id, source: 'lastlink' });
-  notifyApprovedSale({ plan: order.access_group_key || 'vip', amountCents: order.amount_cents, source: 'lastlink' }).catch(() => {});
+  adminEvents.publish('email.queued', { orderId: order.id, source });
+  notifyApprovedSale({ plan: order.access_group_key || 'vip', amountCents: order.amount_cents, source }).catch(() => {});
   return { ok: true, orderId: order.id, accessUrl };
 }
 
@@ -238,6 +241,82 @@ function registerCommerceRoutes(app) {
     } catch (error) {
       await db.runQuery("UPDATE orders SET status='configuration_error',provider_status=?,updated_at=? WHERE id=?", [error.code || 'provider_error', new Date().toISOString(), orderId]);
       res.status(error.code === 'PAYMENT_NOT_CONFIGURED' ? 503 : 502).json({ error: error.message, orderId });
+    }
+  });
+
+  app.get('/api/public/kwai-offer', async (_req, res) => {
+    await db.ready;
+    const [settings] = await db.getQuery("SELECT sales_status FROM commerce_settings WHERE id=1");
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      configured: settings?.sales_status === 'active' && sunize.configured(),
+      paymentProvider: 'Sunize',
+      plans: {
+        vip: { amountCents: sunize.planConfig('vip').amountCents },
+        clube: { amountCents: sunize.planConfig('clube').amountCents },
+      },
+    });
+  });
+
+  app.post('/api/public/sunize/orders', async (req, res) => {
+    await db.ready;
+    if (!sunize.configured()) return res.status(503).json({ error: 'O pagamento PIX ainda está sendo configurado.' });
+    const [settings] = await db.getQuery('SELECT sales_status FROM commerce_settings WHERE id=1');
+    if (settings?.sales_status !== 'active') return res.status(409).json({ error: 'As vendas estão temporariamente pausadas.' });
+
+    const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+    const attempt = sunizeCheckoutAttempts.get(ip) || { count: 0, since: Date.now() };
+    if (Date.now() - attempt.since > 10 * 60_000) { attempt.count = 0; attempt.since = Date.now(); }
+    attempt.count += 1;
+    sunizeCheckoutAttempts.set(ip, attempt);
+    if (attempt.count > 10) return res.status(429).json({ error: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.' });
+
+    const plan = req.body.plan === 'clube' ? 'clube' : req.body.plan === 'vip' ? 'vip' : '';
+    const name = cleanText(req.body.name, 120);
+    const email = cleanText(req.body.email, 180).toLowerCase();
+    const document = security.normalizeCpf(req.body.document);
+    const phoneDigits = String(req.body.phone || '').replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '').slice(0, 11);
+    if (!plan || name.length < 3 || !validEmail(email) || !security.isDocumentShapeValid(document)
+      || phoneDigits.length < 10 || req.body.terms !== true) {
+      return res.status(422).json({ error: 'Confira nome, e-mail, WhatsApp, CPF/CNPJ e aceite dos termos.' });
+    }
+
+    const now = new Date().toISOString();
+    const documentHash = security.hashCpf(document);
+    let [customer] = await db.getQuery('SELECT id FROM customers WHERE cpf_hash=? ORDER BY created_at DESC LIMIT 1', [documentHash]);
+    if (!customer) {
+      customer = { id: security.randomId('cus') };
+      await db.runQuery('INSERT INTO customers (id,name,email,cpf_encrypted,cpf_hash,cpf_mask,phone,terms_accepted_at,marketing_opt_in,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        [customer.id, name, email, security.encryptCpf(document), documentHash, security.maskCpf(document), phoneDigits, now, req.body.marketing === true ? 1 : 0, now]);
+    } else {
+      await db.runQuery('UPDATE customers SET name=?,email=?,phone=?,marketing_opt_in=? WHERE id=?',
+        [name, email, phoneDigits, req.body.marketing === true ? 1 : 0, customer.id]);
+    }
+
+    const orderId = security.randomId('ord');
+    const product = sunize.planConfig(plan);
+    await db.runQuery("INSERT INTO orders (id,customer_id,access_group_key,amount_cents,currency,status,provider_status,created_at,updated_at) VALUES (?,?,?,?, 'BRL','pending','sunize_creating',?,?)",
+      [orderId, customer.id, plan, product.amountCents, now, now]);
+    try {
+      const tracking = {};
+      for (const key of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term']) {
+        const value = cleanText(req.body[key], 200);
+        if (value) tracking[key] = value;
+      }
+      if (!tracking.utm_source) tracking.utm_source = 'kwai';
+      const transaction = await sunize.createTransaction({
+        orderId, plan, ip,
+        customer: { name, email, phone: `+55${phoneDigits}`, document },
+        tracking,
+      });
+      const qrDataUrl = await QRCode.toDataURL(transaction.pixCode, { width: 320, margin: 1, errorCorrectionLevel: 'M' });
+      await db.runQuery('UPDATE orders SET provider_payment_id=?,provider_status=?,pix_code=?,pix_qr_base64=?,updated_at=? WHERE id=?',
+        [transaction.id, `sunize_${transaction.status}`, transaction.pixCode, qrDataUrl, new Date().toISOString(), orderId]);
+      res.status(201).json({ orderId, status: transaction.status, pixCode: transaction.pixCode, pixQrBase64: qrDataUrl, amountCents: product.amountCents });
+    } catch (error) {
+      await db.runQuery("UPDATE orders SET status='configuration_error',provider_status=?,updated_at=? WHERE id=?",
+        [error.code || 'sunize_error', new Date().toISOString(), orderId]);
+      res.status(error.code === 'SUNIZE_NOT_CONFIGURED' ? 503 : 502).json({ error: error.message, orderId });
     }
   });
 
@@ -337,6 +416,53 @@ function registerCommerceRoutes(app) {
     }
   });
 
+  app.post('/api/webhooks/sunize', async (req, res) => {
+    if (!sunize.webhookAuthorized(req)) return res.status(401).json({ error: 'Webhook não autorizado.' });
+    const payload = req.body || {};
+    const transactionId = cleanText(payload.id || payload.transaction_id, 180);
+    const externalOrderId = cleanText(payload.external_id, 180);
+    const status = cleanText(payload.status, 40).toUpperCase();
+    if (!transactionId || !status) return res.status(422).json({ error: 'Evento Sunize incompleto.' });
+    const eventKey = `${transactionId}:${status}`;
+    try { await db.runQuery("INSERT INTO webhook_events(provider,event_key,received_at) VALUES ('sunize',?,?)", [eventKey, new Date().toISOString()]); }
+    catch (error) { if (/UNIQUE|PRIMARY/i.test(error.message)) return res.sendStatus(200); throw error; }
+    try {
+      const [order] = await db.getQuery('SELECT * FROM orders WHERE id=? OR provider_payment_id=? ORDER BY created_at DESC LIMIT 1', [externalOrderId, transactionId]);
+      if (!order) {
+        await db.runQuery("UPDATE webhook_events SET processed_at=?,result=? WHERE provider='sunize' AND event_key=?",
+          [new Date().toISOString(), JSON.stringify({ ok: true, ignored: true, reason: 'order_not_found' }), eventKey]);
+        return res.sendStatus(200);
+      }
+      const amountCents = Math.round(Number(payload.amount || 0) * 100);
+      if (amountCents && amountCents !== Number(order.amount_cents)) {
+        await db.runQuery("UPDATE webhook_events SET processed_at=?,result=? WHERE provider='sunize' AND event_key=?",
+          [new Date().toISOString(), JSON.stringify({ ok: false, reason: 'amount_mismatch' }), eventKey]);
+        return res.status(422).json({ error: 'Valor do pagamento não confere.' });
+      }
+      const now = new Date().toISOString();
+      await db.runQuery('UPDATE orders SET provider_payment_id=?,provider_status=?,updated_at=? WHERE id=?',
+        [transactionId, `sunize_${status}`, now, order.id]);
+      if (status === 'AUTHORIZED') {
+        const [customer] = await db.getQuery('SELECT * FROM customers WHERE id=?', [order.customer_id]);
+        await grantAccess(order, customer, 'sunize');
+        adminEvents.publish('purchase.approved', { orderId: order.id, plan: order.access_group_key || 'vip', source: 'sunize' });
+      } else if (['REFUNDED', 'CHARGEBACK', 'IN_DISPUTE'].includes(status)) {
+        const localStatus = status === 'REFUNDED' ? 'refunded' : status === 'CHARGEBACK' ? 'chargeback' : 'in_dispute';
+        await db.runQuery('UPDATE orders SET status=?,updated_at=? WHERE id=?', [localStatus, now, order.id]);
+        adminEvents.publish('purchase.revoked', { orderId: order.id, status: localStatus, source: 'sunize' });
+      } else if (status === 'FAILED') {
+        await db.runQuery("UPDATE orders SET status='failed',updated_at=? WHERE id=? AND status!='approved'", [now, order.id]);
+      }
+      await db.runQuery("UPDATE webhook_events SET processed_at=?,result=? WHERE provider='sunize' AND event_key=?",
+        [new Date().toISOString(), JSON.stringify({ ok: true, orderId: order.id, status }), eventKey]);
+      res.json({ ok: true, orderId: order.id });
+    } catch (error) {
+      await db.runQuery("DELETE FROM webhook_events WHERE provider='sunize' AND event_key=? AND processed_at IS NULL", [eventKey]).catch(() => {});
+      adminEvents.publish('webhook.failed', { source: 'sunize' });
+      res.sendStatus(500);
+    }
+  });
+
   app.post('/api/staff/login', (req, res) => {
     const ip = req.ip; const attempt = staffLoginAttempts.get(ip) || { count: 0, until: 0 };
     if (attempt.until > Date.now()) return res.status(429).json({ error: 'Muitas tentativas. Aguarde alguns minutos.' });
@@ -357,14 +483,14 @@ function registerCommerceRoutes(app) {
   app.post('/api/staff/cpf-lookup', security.requireStaff, async (req, res) => {
     const document = security.normalizeCpf(req.body.document || req.body.cpf);
     if (!security.isDocumentShapeValid(document)) return res.status(422).json({ error: 'Informe um CPF ou CNPJ válido.' });
-    const rows = await db.getQuery(`SELECT c.name,o.status,o.provider_status,o.approved_at,o.redeem_expires_at,o.created_at
+    const rows = await db.getQuery(`SELECT c.name,o.status,o.provider_status,o.access_group_key,o.approved_at,o.redeem_expires_at,o.created_at
       FROM customers c JOIN orders o ON o.customer_id=c.id WHERE c.cpf_hash=? ORDER BY o.created_at DESC LIMIT 1`, [security.hashCpf(document)]);
     const order = rows[0];
     if (!order) return res.json({ found: false });
     const purchasedAt = new Date(order.approved_at || order.created_at);
     const validUntil = new Date(purchasedAt); validUntil.setFullYear(validUntil.getFullYear() + 1);
     const active = order.status === 'approved' && validUntil > new Date();
-    const plan = order.provider_status === 'confirmed_clube' ? 'Clube Sócio' : 'VIP Garimpo';
+    const plan = order.access_group_key === 'clube' || order.provider_status === 'confirmed_clube' ? 'Clube Sócio' : 'VIP Garimpo';
     const documentType = document.length === 14 ? 'CNPJ' : 'CPF';
     res.json({ found: true, customer: maskName(order.name), documentType, documentLastFive: document.slice(-5), cpfLastFive: document.slice(-5), plan, status: active ? 'ativo' : 'inativo', purchasedAt: purchasedAt.toISOString(), validUntil: validUntil.toISOString(), invitePageExpiresAt: order.redeem_expires_at || null });
   });
@@ -412,13 +538,13 @@ function registerCommerceRoutes(app) {
         e.sent_at email_sent_at,e.next_attempt_at email_next_attempt_at,
         CASE WHEN o.redeem_token_hash IS NOT NULL THEN 1 ELSE 0 END has_redeem,
         CASE WHEN o.access_group_key='clube' OR o.provider_status='confirmed_clube' THEN 'clube' ELSE 'vip' END plan_key,
-        CASE WHEN imported_event.event_key IS NOT NULL THEN 'import' WHEN o.provider_status LIKE 'confirmed%' THEN 'lastlink' ELSE 'manual' END purchase_source
+        CASE WHEN imported_event.event_key IS NOT NULL THEN 'import' WHEN o.provider_status LIKE 'sunize_%' THEN 'sunize' WHEN o.provider_status LIKE 'confirmed%' THEN 'lastlink' ELSE 'manual' END purchase_source
         FROM orders o JOIN customers c ON c.id=o.customer_id
         LEFT JOIN email_jobs e ON e.order_id=o.id
         LEFT JOIN webhook_events imported_event ON imported_event.provider='lastlink' AND imported_event.event_key=('import:' || o.provider_payment_id)
         ORDER BY o.created_at DESC LIMIT 500`),
       db.getQuery('SELECT * FROM store_offers ORDER BY created_at DESC LIMIT 100'), db.getQuery('SELECT status,COUNT(*) count FROM email_jobs GROUP BY status'),
-      db.getQuery("SELECT event_key,received_at,processed_at,result FROM webhook_events WHERE provider='lastlink' ORDER BY received_at DESC LIMIT 25"),
+      db.getQuery("SELECT event_key,received_at,processed_at,result FROM webhook_events WHERE provider IN ('lastlink','sunize') ORDER BY received_at DESC LIMIT 25"),
       db.getQuery(`SELECT
         COALESCE(SUM(CASE WHEN status='approved' THEN amount_cents ELSE 0 END), 0) AS total_received_cents,
         COALESCE(SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END), 0) AS approved_count,
@@ -449,6 +575,8 @@ function registerCommerceRoutes(app) {
       lastlinkCheckout: vipCheckout && clubeCheckout,
       lastlinkWebhook: vipWebhook && clubeWebhook,
       lastlinkProduct: vipProduct && clubeProduct,
+      sunizeCheckout: sunize.configured(),
+      sunizeWebhook: sunize.configured(),
       smtp: smtpConfigured(),
       aiResearch: !!(process.env.NVIDIA_API_KEY && process.env.NVIDIA_TEXT_MODEL && process.env.NVIDIA_VISION_MODEL),
     } });
@@ -475,7 +603,7 @@ function registerCommerceRoutes(app) {
     const leads = await db.getQuery(`SELECT o.id,o.amount_cents,o.currency,o.status,o.provider_status,o.access_group_key,
       o.approved_at,o.created_at,c.name,c.email,c.phone,c.cpf_mask,c.marketing_opt_in,
       CASE WHEN o.access_group_key='clube' OR o.provider_status='confirmed_clube' THEN 'clube' ELSE 'vip' END plan_key,
-      CASE WHEN imported_event.event_key IS NOT NULL THEN 'import' WHEN o.provider_status LIKE 'confirmed%' THEN 'lastlink' ELSE 'manual' END purchase_source
+      CASE WHEN imported_event.event_key IS NOT NULL THEN 'import' WHEN o.provider_status LIKE 'sunize_%' THEN 'sunize' WHEN o.provider_status LIKE 'confirmed%' THEN 'lastlink' ELSE 'manual' END purchase_source
       FROM orders o JOIN customers c ON c.id=o.customer_id
       LEFT JOIN webhook_events imported_event ON imported_event.provider='lastlink' AND imported_event.event_key=('import:' || o.provider_payment_id)
       ORDER BY o.created_at DESC`);
