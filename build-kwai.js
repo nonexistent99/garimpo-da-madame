@@ -10,6 +10,10 @@ for (const file of ['index.html', 'landing.js', 'kwai.css']) {
   fs.copyFileSync(path.join(root, 'kwai', file), path.join(output, file));
 }
 
+for (const file of ['depoimento-cliente-01.mp4', 'depoimento-cliente-02.mp4', 'depoimento-cliente-03.mp4']) {
+  fs.rmSync(path.join(output, 'assets', 'garimpo', file), { force: true });
+}
+
 fs.writeFileSync(path.join(output, '_redirects'), [
   '/api/* https://garimpo-api-production.up.railway.app/api/:splat 200!',
   '/admin /admin.html 200',

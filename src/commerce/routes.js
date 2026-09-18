@@ -246,10 +246,9 @@ function registerCommerceRoutes(app) {
 
   app.get('/api/public/kwai-offer', async (_req, res) => {
     await db.ready;
-    const [settings] = await db.getQuery("SELECT sales_status FROM commerce_settings WHERE id=1");
     res.setHeader('Cache-Control', 'no-store');
     res.json({
-      configured: settings?.sales_status === 'active' && sunize.configured(),
+      configured: sunize.configured(),
       paymentProvider: 'Sunize',
       plans: {
         vip: { amountCents: sunize.planConfig('vip').amountCents },
@@ -261,8 +260,6 @@ function registerCommerceRoutes(app) {
   app.post('/api/public/sunize/orders', async (req, res) => {
     await db.ready;
     if (!sunize.configured()) return res.status(503).json({ error: 'O pagamento PIX ainda está sendo configurado.' });
-    const [settings] = await db.getQuery('SELECT sales_status FROM commerce_settings WHERE id=1');
-    if (settings?.sales_status !== 'active') return res.status(409).json({ error: 'As vendas estão temporariamente pausadas.' });
 
     const ip = req.ip || req.socket?.remoteAddress || 'unknown';
     const attempt = sunizeCheckoutAttempts.get(ip) || { count: 0, since: Date.now() };
